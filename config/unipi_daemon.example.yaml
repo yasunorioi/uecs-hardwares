@@ -1,0 +1,44 @@
+# unipi-daemon 設定テンプレート
+# 本番: /etc/agriha/unipi_daemon.yaml にコピーして使用
+
+daemon:
+  house_id: h01                  # ハウスID (MQTTトピックプレフィックスに使用)
+  sensor_interval_sec: 10        # センサー読み取り間隔 (秒)
+
+mqtt:
+  broker: localhost              # MQTTブローカーホスト
+  port: 1883                     # MQTTブローカーポート
+  client_id: unipi-daemon        # MQTTクライアントID
+  keepalive: 60                  # MQTT keepalive (秒)
+
+i2c:
+  bus: 1                         # I2Cバス番号 (/dev/i2c-1)
+  mcp23008_addr: 0x20            # MCP23008 I2Cアドレス
+
+gpio:
+  chip: /dev/gpiochip0           # GPIOチップデバイス
+  # 緊急オーバーライド対象 DI ピン番号リスト (UniPi 1.1 DI07-DI14)
+  di_lines: [7, 8, 9, 10, 11, 12, 13, 14]
+
+onewire:
+  # DS18B20デバイスID一覧 (例: 28-00000de13271)
+  # ls /sys/bus/w1/devices/ で確認
+  devices: []
+
+uart:
+  # Misol WH65LP 気象センサー
+  weather_port: /dev/ttyUSB0
+  weather_baud: 9600
+
+ccm:
+  # UECS-CCM マルチキャスト受信 (ArSprout 内気象ノード)
+  enabled: true                  # false で無効化
+  multicast_addr: "224.0.0.1"   # CCM マルチキャストアドレス
+  multicast_port: 16520          # CCM ポート
+
+rest_api:
+  # FastAPI REST-MQTT コンバータ設定
+  host: 0.0.0.0                 # バインドアドレス (0.0.0.0=全I/F)
+  port: 8080                    # ポート番号
+  # APIキー認証 (空文字で認証スキップ、本番では必ず設定すること)
+  api_key: ""

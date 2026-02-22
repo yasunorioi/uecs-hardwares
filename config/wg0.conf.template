@@ -1,0 +1,30 @@
+# WireGuard VPN設定テンプレート
+#
+# 使用方法:
+#   1. このファイルをコピーして wg0.conf を作成
+#   2. 各値を実際のキーに置き換える
+#   3. /etc/wireguard/wg0.conf に配置
+#   4. sudo systemctl enable --now wg-quick@wg0
+
+[Interface]
+# このデバイスのVPN IPアドレス
+Address = 10.10.0.XX/24
+
+# このデバイスの秘密鍵（wg genkey で生成）
+PrivateKey = YOUR_PRIVATE_KEY_HERE
+
+[Peer]
+# VPNサーバー（さくらクラウド）の公開鍵
+PublicKey = YOUR_SERVER_PUBLIC_KEY_HERE
+
+# 事前共有キー（オプション、wg genpsk で生成）
+PresharedKey = YOUR_PRESHARED_KEY_HERE
+
+# VPNサーバーのアドレス
+Endpoint = YOUR_SERVER_IP:51820
+
+# VPN経由でルーティングするネットワーク
+AllowedIPs = 10.10.0.0/24
+
+# NATの後ろにいる場合、定期的にパケットを送信して接続を維持
+PersistentKeepalive = 25

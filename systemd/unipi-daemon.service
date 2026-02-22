@@ -1,0 +1,39 @@
+[Unit]
+Description=UniPi AgriHA Control Daemon
+Documentation=https://github.com/yasunorioi/uecs-llm
+# MQTT ブローカーが起動してから unipi-daemon を起動する
+After=network.target mosquitto.service
+Wants=mosquitto.service
+
+[Service]
+Type=simple
+User=agriha
+Group=agriha
+
+# 設定ファイルパス (venv 経由で実行)
+Environment="PATH=/opt/uecs-llm/venv/bin:/usr/local/bin:/usr/bin"
+ExecStart=/usr/local/bin/unipi-daemon --config /etc/agriha/unipi_daemon.yaml
+
+# 異常終了時に自動再起動 (5秒待機)
+Restart=on-failure
+RestartSec=5s
+
+# 標準出力/エラーを journald に記録
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=unipi-daemon
+
+# I2C / GPIO アクセスに必要なグループ
+# i2c グループ: /dev/i2c-* アクセス
+# gpio グループ: /dev/gpiochip* アクセス
+SupplementaryGroups=i2c gpio
+
+# セキュリティ強化
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/agriha /tmp
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
