@@ -9,10 +9,10 @@ Wants=mosquitto.service
 Type=simple
 User=agriha
 Group=agriha
-
-# 設定ファイルパス (venv 経由で実行)
-Environment="PATH=/opt/uecs-llm/venv/bin:/usr/local/bin:/usr/bin"
-ExecStart=/usr/local/bin/unipi-daemon --config /etc/agriha/unipi_daemon.yaml
+WorkingDirectory=/home/agriha/uecs-llm
+EnvironmentFile=/home/agriha/uecs-llm/.env
+Environment="PATH=/home/agriha/uecs-llm/venv/bin:/usr/local/bin:/usr/bin"
+ExecStart=/home/agriha/uecs-llm/venv/bin/unipi-daemon --config /etc/agriha/unipi_daemon.yaml
 
 # 異常終了時に自動再起動 (5秒待機)
 Restart=on-failure
@@ -31,8 +31,8 @@ SupplementaryGroups=i2c gpio
 # セキュリティ強化
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=true
-ReadWritePaths=/var/log/agriha /tmp
+ProtectHome=false
+ReadWritePaths=/var/log/agriha /tmp /var/lib/agriha
 PrivateTmp=true
 
 [Install]
