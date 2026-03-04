@@ -9,10 +9,10 @@ Wants=mosquitto.service
 Type=simple
 User=agriha
 Group=agriha
-WorkingDirectory=/home/agriha/uecs-llm
-EnvironmentFile=/home/agriha/uecs-llm/.env
-Environment="PATH=/home/agriha/uecs-llm/venv/bin:/usr/local/bin:/usr/bin"
-ExecStart=/home/agriha/uecs-llm/venv/bin/unipi-daemon --config /etc/agriha/unipi_daemon.yaml
+WorkingDirectory=__REPO_DIR__
+EnvironmentFile=__REPO_DIR__/.env
+Environment="PATH=__REPO_DIR__/.venv/bin:/usr/local/bin:/usr/bin"
+ExecStart=__REPO_DIR__/.venv/bin/unipi-daemon --config /etc/agriha/unipi_daemon.yaml
 
 # 異常終了時に自動再起動 (5秒待機)
 Restart=on-failure
