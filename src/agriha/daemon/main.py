@@ -43,6 +43,34 @@ from .sensor_loop import SensorLoop
 from .ccm_receiver import CcmReceiver
 from .rest_api import RestApi
 
+
+class _NullRelay:
+    """HW未接続時のダミーリレー。全操作no-op、REST API等は動作継続。"""
+
+    def set_relay(self, channel: int, on: bool) -> None:
+        logger.debug("NullRelay: set_relay ch%d %s (no-op)", channel, "ON" if on else "OFF")
+
+    def get_state(self) -> int:
+        return 0x00
+
+    def get_relay(self, channel: int) -> bool:
+        return False
+
+    def set_all(self, bitmask: int) -> None:
+        logger.debug("NullRelay: set_all 0x%02X (no-op)", bitmask)
+
+    def all_off(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+    def __enter__(self) -> "_NullRelay":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        pass
+
 logger = logging.getLogger(__name__)
 
 
@@ -228,10 +256,14 @@ class UnipiDaemon:
         mqtt_cfg = self._config.get("mqtt", {})
         house_id: str = daemon_cfg.get("house_id", "h01")
 
-        relay = MCP23008Relay(
-            bus_num=int(i2c_cfg.get("bus", 1)),
-            addr=int(i2c_cfg.get("mcp23008_addr", 0x20)),
-        )
+        try:
+            relay = MCP23008Relay(
+                bus_num=int(i2c_cfg.get("bus", 1)),
+                addr=int(i2c_cfg.get("mcp23008_addr", 0x20)),
+            )
+        except (OSError, ImportError) as exc:
+            logger.warning("I2C relay unavailable (%s) — running with NullRelay (HW操作は無効)", exc)
+            relay = _NullRelay()
 
         # CommandGate 用 MQTT クライアント (緊急オーバーライド通知)
         gate_mqtt_client: Optional[Any] = None
