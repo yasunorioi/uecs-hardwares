@@ -1,0 +1,11 @@
+Comment,Designator,Footprint,Qty,Note
+Pico_Left,J1,PinSocket_1x20_P2.54mm_Vertical,1,Raspberry Pi Pico W ピンソケット左
+Pico_Right,J2,PinSocket_1x20_P2.54mm_Vertical,1,Raspberry Pi Pico W ピンソケット右
+Grove_I2C0,J3,JST_PH_B4B-PH-K_1x04_P2.00mm_Vertical,1,Grove I2C0コネクタ (SHT31等)
+Grove_I2C1,J4,JST_PH_B4B-PH-K_1x04_P2.00mm_Vertical,1,Grove I2C1コネクタ (CO2等)
+ADC0,J5,JST_PH_B3B-PH-K_1x03_P2.00mm_Vertical,1,ADC0入力 (土壌水分等)
+ADC1,J6,JST_PH_B3B-PH-K_1x03_P2.00mm_Vertical,1,ADC1入力
+ADC2,J7,JST_PH_B3B-PH-K_1x03_P2.00mm_Vertical,1,ADC2入力
+1-Wire,J8,JST_PH_B3B-PH-K_1x03_P2.00mm_Vertical,1,1-Wire (DS18B20温度)
+Fan,J9,TerminalBlock_bornier-2_P5.08mm,1,ファン制御用ターミナルブロック
+W5500,U1,W5500-EVB-Pico module,1,W5500-EVB-Pico (Ethernet) ※基板上に載せる場合

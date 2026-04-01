@@ -1,0 +1,8 @@
+Comment,Designator,Footprint,Qty,Note
+Pico_Left,J1,PinSocket_1x20_P2.54mm_Vertical,1,Raspberry Pi Pico 2 W ピンソケット左
+Pico_Right,J2,PinSocket_1x20_P2.54mm_Vertical,1,Raspberry Pi Pico 2 W ピンソケット右
+PC817,"U1,U2,U3,U4",DIP-4,4,フォトカプラ PC817 (絶縁段)
+5V Relay,"K1,K2,K3,K4",SPDT relay,4,5V SPDTリレー (10A@250VAC) SRD-05VDC等
+Relay Screw Terminal,"J3,J4,J5,J6",TerminalBlock_bornier-3_P5.08mm,4,リレー出力用3Pターミナルブロック (COM/NO/NC)
+Power Terminal,J7,TerminalBlock_bornier-2_P5.08mm,1,5V電源入力ターミナルブロック ※USB給電の場合不要
+1N4007 Flyback,"D1,D2,D3,D4",DO-41,4,リレーコイル用フリーホイールダイオード
