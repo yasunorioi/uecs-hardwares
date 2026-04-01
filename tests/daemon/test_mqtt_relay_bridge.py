@@ -20,7 +20,7 @@ sys.modules.setdefault("paho", MagicMock())
 sys.modules.setdefault("paho.mqtt", MagicMock())
 sys.modules.setdefault("paho.mqtt.client", _paho_mqtt_mock)
 
-from agriha.daemon.mqtt_relay_bridge import MqttRelayBridge  # noqa: E402
+from uecs_hardwares.mqtt_relay_bridge import MqttRelayBridge  # noqa: E402
 
 
 # ------------------------------------------------------------------ #
@@ -76,7 +76,7 @@ class TestDurationTimerCancelAndReplace:
 
     def test_second_command_cancels_first_timer(self, bridge, mock_relay):
         """同一chへ2回目のコマンド送信で、1回目のタイマーが cancel される。"""
-        with patch("agriha.daemon.mqtt_relay_bridge.threading.Timer") as MockTimer:
+        with patch("uecs_hardwares.mqtt_relay_bridge.threading.Timer") as MockTimer:
             timer1 = MagicMock()
             timer2 = MagicMock()
             MockTimer.side_effect = [timer1, timer2]
@@ -103,7 +103,7 @@ class TestDurationTimerCancelAndReplace:
 
     def test_different_channels_have_independent_timers(self, bridge, mock_relay):
         """異なるチャンネルのタイマーは独立しており、互いにキャンセルされない。"""
-        with patch("agriha.daemon.mqtt_relay_bridge.threading.Timer") as MockTimer:
+        with patch("uecs_hardwares.mqtt_relay_bridge.threading.Timer") as MockTimer:
             timer1 = MagicMock()
             timer2 = MagicMock()
             MockTimer.side_effect = [timer1, timer2]
@@ -122,7 +122,7 @@ class TestDurationTimerCancelAndReplace:
 
     def test_value_zero_cancels_existing_timer_no_new_timer(self, bridge, mock_relay):
         """value=0 を送信すると既存タイマーはキャンセルされ、新しいタイマーは作成されない。"""
-        with patch("agriha.daemon.mqtt_relay_bridge.threading.Timer") as MockTimer:
+        with patch("uecs_hardwares.mqtt_relay_bridge.threading.Timer") as MockTimer:
             timer1 = MagicMock()
             MockTimer.side_effect = [timer1]
 
@@ -141,7 +141,7 @@ class TestDurationTimerCancelAndReplace:
 
     def test_timer_stored_under_correct_channel(self, bridge, mock_relay):
         """タイマーが正しいチャンネルキーで _timers に格納される。"""
-        with patch("agriha.daemon.mqtt_relay_bridge.threading.Timer") as MockTimer:
+        with patch("uecs_hardwares.mqtt_relay_bridge.threading.Timer") as MockTimer:
             timer_mock = MagicMock()
             MockTimer.return_value = timer_mock
 
@@ -152,7 +152,7 @@ class TestDurationTimerCancelAndReplace:
 
     def test_triple_command_cancels_each_predecessor(self, bridge, mock_relay):
         """3回連続で同一chにコマンドを送ると、各前任タイマーがキャンセルされる。"""
-        with patch("agriha.daemon.mqtt_relay_bridge.threading.Timer") as MockTimer:
+        with patch("uecs_hardwares.mqtt_relay_bridge.threading.Timer") as MockTimer:
             t1 = MagicMock()
             t2 = MagicMock()
             t3 = MagicMock()
@@ -169,7 +169,7 @@ class TestDurationTimerCancelAndReplace:
 
     def test_relay_set_called_for_each_command(self, bridge, mock_relay):
         """duration タイマー有無に関わらず、各コマンドで relay.set_relay が呼ばれる。"""
-        with patch("agriha.daemon.mqtt_relay_bridge.threading.Timer") as MockTimer:
+        with patch("uecs_hardwares.mqtt_relay_bridge.threading.Timer") as MockTimer:
             MockTimer.return_value = MagicMock()
 
             bridge._on_message(None, None, _make_msg(ch=2, value=1, duration_sec=60))
@@ -197,7 +197,7 @@ class TestThreadingLockConcurrency:
         n_cmds_per_thread = 10
         errors: list[Exception] = []
 
-        with patch("agriha.daemon.mqtt_relay_bridge.threading.Timer") as MockTimer:
+        with patch("uecs_hardwares.mqtt_relay_bridge.threading.Timer") as MockTimer:
             created_timers: list[MagicMock] = []
             lock = threading.Lock()
 
@@ -253,7 +253,7 @@ class TestThreadingLockConcurrency:
         """異なるチャンネルへの並行アクセスで、他チャンネルのタイマーがキャンセルされない。"""
         errors: list[Exception] = []
 
-        with patch("agriha.daemon.mqtt_relay_bridge.threading.Timer") as MockTimer:
+        with patch("uecs_hardwares.mqtt_relay_bridge.threading.Timer") as MockTimer:
             per_ch_timers: dict[int, list[MagicMock]] = {1: [], 2: [], 3: []}
             lock = threading.Lock()
 
@@ -288,7 +288,7 @@ class TestThreadingLockConcurrency:
         """disconnect() 中に _on_message が走ってもデッドロック・例外しない。"""
         errors: list[Exception] = []
 
-        with patch("agriha.daemon.mqtt_relay_bridge.threading.Timer") as MockTimer:
+        with patch("uecs_hardwares.mqtt_relay_bridge.threading.Timer") as MockTimer:
             MockTimer.return_value = MagicMock()
 
             # Pre-seed some timers

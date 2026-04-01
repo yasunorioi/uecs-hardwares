@@ -37,7 +37,7 @@ sys.modules.setdefault("paho.mqtt", paho_mock)
 sys.modules.setdefault("paho.mqtt.client", paho_mock)
 
 from fastapi.testclient import TestClient  # noqa: E402
-from agriha.daemon.rest_api import RestApi, SensorCache  # noqa: E402
+from uecs_hardwares.rest_api import RestApi, SensorCache  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

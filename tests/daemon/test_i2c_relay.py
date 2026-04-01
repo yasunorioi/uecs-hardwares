@@ -16,7 +16,7 @@ smbus2_mock = MagicMock()
 smbus2_mock.SMBus = MagicMock
 sys.modules.setdefault("smbus2", smbus2_mock)
 
-from agriha.daemon.i2c_relay import MCP23008Relay  # noqa: E402
+from uecs_hardwares.i2c_relay import MCP23008Relay  # noqa: E402
 
 
 # ------------------------------------------------------------------ #
@@ -32,7 +32,7 @@ def mock_bus():
 @pytest.fixture
 def relay(mock_bus):
     """MCP23008Relayのインスタンスをmock busで返す。"""
-    with patch("agriha.daemon.i2c_relay.smbus2") as mock_smbus2:
+    with patch("uecs_hardwares.i2c_relay.smbus2") as mock_smbus2:
         mock_smbus2.SMBus.return_value = mock_bus
         r = MCP23008Relay(bus_num=1, addr=0x20)
         r._bus = mock_bus  # 直接差し替え
@@ -98,7 +98,7 @@ class TestInit:
 
     def test_init_sets_iodir_to_output(self, mock_bus):
         """初期化時に IODIR=0x00 (全ピン出力) を書き込む。"""
-        with patch("agriha.daemon.i2c_relay.smbus2") as mock_smbus2:
+        with patch("uecs_hardwares.i2c_relay.smbus2") as mock_smbus2:
             mock_smbus2.SMBus.return_value = mock_bus
             MCP23008Relay(bus_num=1, addr=0x20)
         mock_bus.write_byte_data.assert_called_once_with(0x20, MCP23008Relay.IODIR, 0x00)
@@ -213,7 +213,7 @@ class TestContextManager:
 
     def test_with_statement_calls_close(self, mock_bus):
         """with 文を抜けると close() が呼ばれる。"""
-        with patch("agriha.daemon.i2c_relay.smbus2") as mock_smbus2:
+        with patch("uecs_hardwares.i2c_relay.smbus2") as mock_smbus2:
             mock_smbus2.SMBus.return_value = mock_bus
             with MCP23008Relay(bus_num=1, addr=0x20) as relay:
                 relay._bus = mock_bus

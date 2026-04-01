@@ -1,0 +1,6 @@
+# uecs-hardwares cron設定（Layer 1 のみ）
+# ※ __REPO_DIR__ は setup.sh インストール時に実際のリポジトリパスに置換される
+# Layer 1 のみ: API鍵不要（bash+curl、ローカル演算のみ）
+
+# Layer 1: 緊急制御（毎分）— .env不要（bash+curl、API鍵不使用）
+* * * * * __USER__ __REPO_DIR__/src/uecs_hardwares/emergency_guard.sh 2>&1 | logger -t uecs-hw-guard

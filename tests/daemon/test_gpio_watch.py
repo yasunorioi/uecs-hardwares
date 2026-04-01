@@ -28,7 +28,7 @@ _gpiod_used.EdgeEvent.Type.FALLING_EDGE = _FALLING
 _gpiod_used.EdgeEvent.Type.RISING_EDGE = _RISING
 _gpiod_used.line.Value.INACTIVE = _INACTIVE
 
-from agriha.daemon.gpio_watch import (  # noqa: E402
+from uecs_hardwares.gpio_watch import (  # noqa: E402
     DI_GPIO_MAP,
     GPIO_DI_MAP,
     GPIOEvent,
@@ -126,7 +126,7 @@ class TestGPIOWatcher:
 
     def test_open_creates_chip_with_chip_path(self):
         """open() が指定した chip_path で gpiod.Chip を生成すること。"""
-        with patch("agriha.daemon.gpio_watch.gpiod") as mock_gpiod:
+        with patch("uecs_hardwares.gpio_watch.gpiod") as mock_gpiod:
             mock_gpiod.Chip.return_value = MagicMock()
             watcher = GPIOWatcher(chip_path="/dev/gpiochip0", di_pins=[7])
             watcher.open()
@@ -134,7 +134,7 @@ class TestGPIOWatcher:
 
     def test_open_requests_lines_for_all_di_pins(self):
         """open() が指定した全 DI ピンの GPIO line を request_lines に渡すこと。"""
-        with patch("agriha.daemon.gpio_watch.gpiod") as mock_gpiod:
+        with patch("uecs_hardwares.gpio_watch.gpiod") as mock_gpiod:
             mock_chip = MagicMock()
             mock_gpiod.Chip.return_value = mock_chip
             watcher = GPIOWatcher(di_pins=[7, 8, 9, 10, 11, 12, 13, 14])
@@ -150,7 +150,7 @@ class TestGPIOWatcher:
 
     def test_open_sets_chip_and_request(self):
         """open() 後に _chip と _request が設定されること。"""
-        with patch("agriha.daemon.gpio_watch.gpiod") as mock_gpiod:
+        with patch("uecs_hardwares.gpio_watch.gpiod") as mock_gpiod:
             mock_chip = MagicMock()
             mock_gpiod.Chip.return_value = mock_chip
             watcher = GPIOWatcher(di_pins=[7])
@@ -277,7 +277,7 @@ class TestGPIOWatcherAsync:
     def test_watch_registers_reader_and_cancels_cleanly(self):
         """watch() が add_reader を呼び、CancelledError でクリーンアップされること。"""
         async def _run():
-            with patch("agriha.daemon.gpio_watch.gpiod") as mock_gpiod:
+            with patch("uecs_hardwares.gpio_watch.gpiod") as mock_gpiod:
                 mock_chip = MagicMock()
                 mock_req = MagicMock()
                 mock_req.fd = 42
@@ -317,7 +317,7 @@ class TestGPIOWatcherAsync:
     def test_watch_calls_callback_on_readable(self):
         """fd が readable になったとき callback が呼ばれること。"""
         async def _run():
-            with patch("agriha.daemon.gpio_watch.gpiod") as mock_gpiod:
+            with patch("uecs_hardwares.gpio_watch.gpiod") as mock_gpiod:
                 mock_chip = MagicMock()
                 mock_req = MagicMock()
                 mock_req.fd = 10

@@ -22,8 +22,8 @@ sys.modules.setdefault("smbus2", smbus2_mock)
 gpiod_mock = MagicMock()
 sys.modules.setdefault("gpiod", gpiod_mock)
 
-from agriha.daemon.gpio_watch import GPIOEvent               # noqa: E402
-from agriha.daemon.emergency_override import CommandGate, DI_RELAY_MAP, LOCKOUT_SECONDS  # noqa: E402
+from uecs_hardwares.gpio_watch import GPIOEvent               # noqa: E402
+from uecs_hardwares.emergency_override import CommandGate, DI_RELAY_MAP, LOCKOUT_SECONDS  # noqa: E402
 
 
 # ------------------------------------------------------------------ #
