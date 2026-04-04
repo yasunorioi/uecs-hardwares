@@ -1,0 +1,205 @@
+(pcb generated.dsn
+  (parser
+    (string_quote ")
+    (space_in_quoted_tokens on)
+    (host_cad "KiCad")
+    (host_version "7.0.11")
+  )
+  (resolution mil 10)
+  (unit mil)
+  (structure
+    (layer F.Cu (type signal) (property (index 0)))
+    (layer B.Cu (type signal) (property (index 1)))
+    (boundary
+      (path pcb 0 -2.0 -2.0 2206.7 -2.0 2206.7 2206.7 -2.0 2206.7 -2.0 -2.0)
+    )
+    (via "Via[0-1]_600:300_um")
+    (rule (width 5.9) (clearance 5.9))
+  )
+  (placement
+    (component C_0805_2012Metric
+      (place C3 1496.1 1102.4 front 0)
+      (place C1 1259.8 984.3 front 0)
+      (place C2 1259.8 1220.5 front 0)
+    )
+    (component "JST_PH_B4B-PH-K_1x04_P2.00mm_Vertical"
+      (place J4 1063.0 275.6 front 0)
+      (place J3 551.2 275.6 front 0)
+    )
+    (component R_0805_2012Metric
+      (place R1 669.3 984.3 front 0)
+      (place R7 1653.5 1220.5 front 0)
+      (place R6 1653.5 984.3 front 0)
+      (place R5 472.4 1102.4 front 0)
+      (place R4 1063.0 1220.5 front 0)
+      (place R3 944.9 984.3 front 0)
+      (place R2 748.0 1220.5 front 0)
+    )
+    (component PinSocket_1x20_P2.54mm_Vertical
+      (place J1 152.4 752.4 front 90)
+      (place J2 152.4 1452.4 front 90)
+    )
+    (component "SOT-23"
+      (place Q1 1889.8 1102.4 front 0)
+    )
+    (component "TerminalBlock_bornier-2_P5.08mm"
+      (place J9 1816.1 1929.1 front 0)
+    )
+    (component "JST_PH_B3B-PH-K_1x03_P2.00mm_Vertical"
+      (place J7 1343.7 1929.1 front 0)
+      (place J8 1653.5 275.6 front 0)
+      (place J6 792.5 1929.1 front 0)
+      (place J5 241.3 1929.1 front 0)
+    )
+    (component "D_SOD-123"
+      (place D1 1889.8 1299.2 front 0)
+    )
+  )
+  (library
+    (image C_0805_2012Metric
+      (pin Rect[T]Pad_39x57_um 1 -37.4 0.0)
+      (pin Rect[T]Pad_39x57_um 2 37.4 0.0)
+    )
+    (image "JST_PH_B4B-PH-K_1x04_P2.00mm_Vertical"
+      (pin Round[A]Pad_47_um 1 0.0 0.0)
+      (pin Round[A]Pad_47_um 2 78.7 0.0)
+      (pin Round[A]Pad_47_um 3 157.5 0.0)
+      (pin Round[A]Pad_47_um 4 236.2 0.0)
+    )
+    (image R_0805_2012Metric
+      (pin Rect[T]Pad_40x55_um 1 -35.9 0.0)
+      (pin Rect[T]Pad_40x55_um 2 35.9 0.0)
+    )
+    (image PinSocket_1x20_P2.54mm_Vertical
+      (pin Round[A]Pad_67_um 1 0.0 0.0)
+      (pin Round[A]Pad_67_um 2 0.0 -100.0)
+      (pin Round[A]Pad_67_um 3 0.0 -200.0)
+      (pin Round[A]Pad_67_um 4 0.0 -300.0)
+      (pin Round[A]Pad_67_um 5 0.0 -400.0)
+      (pin Round[A]Pad_67_um 6 0.0 -500.0)
+      (pin Round[A]Pad_67_um 7 0.0 -600.0)
+      (pin Round[A]Pad_67_um 8 0.0 -700.0)
+      (pin Round[A]Pad_67_um 9 0.0 -800.0)
+      (pin Round[A]Pad_67_um 10 0.0 -900.0)
+      (pin Round[A]Pad_67_um 11 0.0 -1000.0)
+      (pin Round[A]Pad_67_um 12 0.0 -1100.0)
+      (pin Round[A]Pad_67_um 13 0.0 -1200.0)
+      (pin Round[A]Pad_67_um 14 0.0 -1300.0)
+      (pin Round[A]Pad_67_um 15 0.0 -1400.0)
+      (pin Round[A]Pad_67_um 16 0.0 -1500.0)
+      (pin Round[A]Pad_67_um 17 0.0 -1600.0)
+      (pin Round[A]Pad_67_um 18 0.0 -1700.0)
+      (pin Round[A]Pad_67_um 19 0.0 -1800.0)
+      (pin Round[A]Pad_67_um 20 0.0 -1900.0)
+    )
+    (image "SOT-23"
+      (pin Rect[T]Pad_58x24_um 1 -36.9 -37.4)
+      (pin Rect[T]Pad_58x24_um 2 -36.9 37.4)
+      (pin Rect[T]Pad_58x24_um 3 36.9 0.0)
+    )
+    (image "TerminalBlock_bornier-2_P5.08mm"
+      (pin Round[A]Pad_118_um 1 0.0 0.0)
+      (pin Round[A]Pad_118_um 2 200.0 0.0)
+    )
+    (image "JST_PH_B3B-PH-K_1x03_P2.00mm_Vertical"
+      (pin Round[A]Pad_47_um 1 0.0 0.0)
+      (pin Round[A]Pad_47_um 2 78.7 0.0)
+      (pin Round[A]Pad_47_um 3 157.5 0.0)
+    )
+    (image "D_SOD-123"
+      (pin Rect[T]Pad_35x47_um 1 -65.0 0.0)
+      (pin Rect[T]Pad_35x47_um 2 65.0 0.0)
+    )
+    (padstack Rect[T]Pad_39x57_um
+      (shape (rect F.Cu -19.7 -28.5 19.7 28.5))
+      (attach off)
+    )
+    (padstack Round[A]Pad_47_um
+      (shape (circle F.Cu 47.2))
+      (shape (circle B.Cu 47.2))
+      (attach off)
+    )
+    (padstack Rect[T]Pad_40x55_um
+      (shape (rect F.Cu -20.2 -27.6 20.2 27.6))
+      (attach off)
+    )
+    (padstack Round[A]Pad_67_um
+      (shape (circle F.Cu 66.9))
+      (shape (circle B.Cu 66.9))
+      (attach off)
+    )
+    (padstack Rect[T]Pad_58x24_um
+      (shape (rect F.Cu -29.0 -11.8 29.0 11.8))
+      (attach off)
+    )
+    (padstack Round[A]Pad_118_um
+      (shape (circle F.Cu 118.1))
+      (shape (circle B.Cu 118.1))
+      (attach off)
+    )
+    (padstack Rect[T]Pad_35x47_um
+      (shape (rect F.Cu -17.7 -23.6 17.7 23.6))
+      (attach off)
+    )
+    (padstack "Via[0-1]_600:300_um"
+      (shape (circle F.Cu 23.6))
+      (shape (circle B.Cu 23.6))
+      (attach off)
+    )
+  )
+  (network
+    (net "Net-(J2-Pin_15)"
+      (pins C3-1 J2-15)
+    )
+    (net "Net-(J1-Pin_10)"
+      (pins J4-1 R4-1 J1-10)
+    )
+    (net "Net-(J1-Pin_9)"
+      (pins J4-2 J1-9 R3-1)
+    )
+    (net "Net-(J1-Pin_6)"
+      (pins R1-1 J3-2 J1-6)
+    )
+    (net "Net-(J1-Pin_7)"
+      (pins J3-1 J1-7 R2-1)
+    )
+    (net "Net-(Q1-G)"
+      (pins R7-1 R6-1 Q1-1)
+    )
+    (net "Net-(J2-Pin_9)"
+      (pins R6-2 J2-9)
+    )
+    (net "Net-(J1-Pin_4)"
+      (pins R5-1 J1-4 J8-2)
+    )
+    (net "Net-(D1-A)"
+      (pins Q1-2 J9-1 J2-19 D1-1 D1-2)
+    )
+    (net "Net-(J2-Pin_14)"
+      (pins J7-3 J2-14)
+    )
+    (net "Net-(J2-Pin_11)"
+      (pins J2-11 J5-3)
+    )
+    (net "Net-(J2-Pin_12)"
+      (pins J2-12 J6-3)
+    )
+    (class default
+      "Net-(J2-Pin_15)"
+      "Net-(J1-Pin_10)"
+      "Net-(J1-Pin_9)"
+      "Net-(J1-Pin_6)"
+      "Net-(J1-Pin_7)"
+      "Net-(Q1-G)"
+      "Net-(J2-Pin_9)"
+      "Net-(J1-Pin_4)"
+      "Net-(D1-A)"
+      "Net-(J2-Pin_14)"
+      "Net-(J2-Pin_11)"
+      "Net-(J2-Pin_12)"
+      (circuit (use_via "Via[0-1]_600:300_um"))
+      (rule (width 5.9) (clearance 5.9))
+    )
+  )
+  (wiring)
+)

@@ -1,0 +1,350 @@
+(session grove_shield_v3
+  (base_design grove_shield_v3)
+  (placement
+    (resolution mil 10)
+    (component C_0805_2012Metric
+      (place C3 14961 11024 front 0)
+      (place C1 12598 9843 front 0)
+      (place C2 12598 12205 front 0)
+    )
+    (component "JST_PH_B4B-PH-K_1x04_P2.00mm_Vertical"
+      (place J4 10630 2756 front 0)
+      (place J3 5512 2756 front 0)
+    )
+    (component R_0805_2012Metric
+      (place R1 6693 9843 front 0)
+      (place R7 16535 12205 front 0)
+      (place R6 16535 9843 front 0)
+      (place R5 4724 11024 front 0)
+      (place R4 10630 12205 front 0)
+      (place R3 9449 9843 front 0)
+      (place R2 7480 12205 front 0)
+    )
+    (component PinSocket_1x20_P2.54mm_Vertical
+      (place J1 1524 7524 front 90)
+      (place J2 1524 14524 front 90)
+    )
+    (component "SOT-23"
+      (place Q1 18898 11024 front 0)
+    )
+    (component "TerminalBlock_bornier-2_P5.08mm"
+      (place J9 18161 19291 front 0)
+    )
+    (component "JST_PH_B3B-PH-K_1x03_P2.00mm_Vertical"
+      (place J7 13437 19291 front 0)
+      (place J8 16535 2756 front 0)
+      (place J6 7925 19291 front 0)
+      (place J5 2413 19291 front 0)
+    )
+    (component "D_SOD-123"
+      (place D1 18898 12992 front 0)
+    )
+  )
+  (was_is
+  )
+  (routes 
+    (resolution mil 10)
+    (parser
+      (host_cad KiCad)
+      (host_version 7.0.11)
+    )
+    (library_out 
+      (padstack "Via[0-1]_600:300_um"
+        (shape
+          (circle F.Cu 236 0 0)
+        )
+        (shape
+          (circle B.Cu 236 0 0)
+        )
+        (attach off)
+      )
+      (padstack "Via[0-1]_600:300_um"
+        (shape
+          (circle F.Cu 236 0 0)
+        )
+        (shape
+          (circle B.Cu 236 0 0)
+        )
+        (attach off)
+      )
+    )
+    (network_out 
+      (net "Net-(J2-Pin_15)"
+        (wire
+          (path F.Cu 60
+            14587 11024
+            14891 11024
+          )
+        )
+        (wire
+          (path F.Cu 60
+            15524 14524
+            14891 13891
+            14891 11024
+          )
+        )
+      )
+      (net "Net-(J1-Pin_10)"
+        (wire
+          (path F.Cu 60
+            10524 7524
+            10524 2862
+            10630 2756
+          )
+        )
+        (wire
+          (path F.Cu 60
+            10271 12205
+            10271 7777
+            10524 7524
+          )
+        )
+      )
+      (net "Net-(J1-Pin_9)"
+        (wire
+          (path F.Cu 60
+            9524 7524
+            9524 3160
+            10511 2173
+            10834 2173
+            11417 2756
+          )
+        )
+        (wire
+          (path F.Cu 60
+            9090 9843
+            9090 7958
+            9524 7524
+          )
+        )
+      )
+      (net "Net-(J1-Pin_6)"
+        (wire
+          (path F.Cu 60
+            6524 7524
+            6299 7299
+            6299 2756
+          )
+        )
+        (wire
+          (path F.Cu 60
+            6334 9843
+            6334 7714
+            6524 7524
+          )
+        )
+      )
+      (net "Net-(J1-Pin_7)"
+        (wire
+          (path F.Cu 60
+            7121 12205
+            7430 12205
+          )
+        )
+        (wire
+          (path F.Cu 60
+            7430 12205
+            7430 7618
+            7524 7524
+          )
+        )
+        (wire
+          (path F.Cu 60
+            5512 2756
+            5859 2409
+            6630 2409
+            6646 2425
+            6646 6646
+            7524 7524
+          )
+        )
+      )
+      (net "Net-(Q1-G)"
+        (wire
+          (path F.Cu 60
+            16176 10875
+            16176 9843
+          )
+        )
+        (wire
+          (path F.Cu 60
+            16176 11024
+            16176 10875
+          )
+        )
+        (wire
+          (path F.Cu 60
+            16176 10875
+            18529 10875
+          )
+        )
+        (wire
+          (path F.Cu 60
+            18529 10650
+            18529 10875
+          )
+        )
+        (wire
+          (path F.Cu 60
+            16176 12205
+            16176 11024
+          )
+        )
+      )
+      (net "Net-(J2-Pin_9)"
+        (wire
+          (path F.Cu 60
+            16894 9843
+            16585 9843
+          )
+        )
+        (wire
+          (path F.Cu 60
+            9524 14524
+            11446 12602
+            11446 11828
+            12627 10647
+            14186 10647
+            15373 9460
+            16511 9460
+            16585 9534
+            16585 9843
+          )
+        )
+      )
+      (net "Net-(J1-Pin_4)"
+        (wire
+          (path B.Cu 60
+            4524 7524
+            7431 4617
+            15461 4617
+            17322 2756
+          )
+        )
+        (wire
+          (path F.Cu 60
+            4365 11024
+            4365 10641
+          )
+        )
+        (wire
+          (path F.Cu 60
+            4524 7524
+            4524 10482
+            4365 10641
+          )
+        )
+      )
+      (net "Net-(D1-A)"
+        (wire
+          (path F.Cu 60
+            18248 12992
+            18532 12992
+          )
+        )
+        (wire
+          (path F.Cu 60
+            18756 12484
+            19264 12992
+          )
+        )
+        (wire
+          (path F.Cu 60
+            18529 12257
+            18756 12484
+          )
+        )
+        (wire
+          (path F.Cu 60
+            18756 12484
+            18532 12708
+            18532 12992
+          )
+        )
+        (wire
+          (path F.Cu 60
+            18529 11904
+            18529 12257
+          )
+        )
+        (wire
+          (path F.Cu 60
+            18529 11634
+            18529 11904
+          )
+        )
+        (wire
+          (path F.Cu 60
+            18529 11623
+            18529 11634
+          )
+        )
+        (wire
+          (path F.Cu 60
+            19548 12992
+            19264 12992
+          )
+        )
+        (wire
+          (path F.Cu 60
+            18529 11511
+            18529 11623
+          )
+        )
+        (wire
+          (path F.Cu 60
+            18529 11398
+            18529 11511
+          )
+        )
+        (wire
+          (path F.Cu 60
+            18161 19291
+            19524 17928
+            19524 14524
+          )
+        )
+        (wire
+          (path F.Cu 60
+            19548 12992
+            19548 13335
+          )
+        )
+        (wire
+          (path F.Cu 60
+            19524 14524
+            19524 13359
+            19548 13335
+          )
+        )
+      )
+      (net "Net-(J2-Pin_14)"
+        (wire
+          (path F.Cu 60
+            14524 14524
+            14524 18803
+            15012 19291
+          )
+        )
+      )
+      (net "Net-(J2-Pin_11)"
+        (wire
+          (path B.Cu 60
+            11524 14524
+            6757 19291
+            3988 19291
+          )
+        )
+      )
+      (net "Net-(J2-Pin_12)"
+        (wire
+          (path F.Cu 60
+            12524 14524
+            12524 16267
+            9500 19291
+          )
+        )
+      )
+    )
+  )
+)

@@ -1,0 +1,274 @@
+(pcb generated.dsn
+  (parser
+    (string_quote ")
+    (space_in_quoted_tokens on)
+    (host_cad "KiCad")
+    (host_version "7.0.11")
+  )
+  (resolution mil 10)
+  (unit mil)
+  (structure
+    (layer F.Cu (type signal) (property (index 0)))
+    (layer B.Cu (type signal) (property (index 1)))
+    (boundary
+      (path pcb 0 -2.0 -2.0 3151.6 -2.0 3151.6 1970.5 -2.0 1970.5 -2.0 -2.0)
+    )
+    (via "Via[0-1]_600:300_um")
+    (rule (width 5.9) (clearance 5.9))
+  )
+  (placement
+    (component "DIP-4_W7.62mm"
+      (place U2 433.1 472.4 front 0)
+      (place U3 1063.0 472.4 front 0)
+      (place U5 2322.8 472.4 front 0)
+      (place U4 1692.9 472.4 front 0)
+    )
+    (component R_0805_2012Metric
+      (place R11 1968.5 905.5 front 90)
+      (place R2 1181.1 590.6 front 90)
+      (place R3 1811.0 590.6 front 90)
+      (place R13 433.1 354.3 front 90)
+      (place R10 1338.6 905.5 front 90)
+      (place R16 2322.8 354.3 front 90)
+      (place R4 2440.9 590.6 front 90)
+      (place R7 2086.6 787.4 front 90)
+      (place R6 1456.7 787.4 front 90)
+      (place R15 1692.9 354.3 front 90)
+      (place R9 708.7 905.5 front 90)
+      (place R1 551.2 590.6 front 90)
+      (place R5 826.8 787.4 front 90)
+      (place R14 1063.0 354.3 front 90)
+      (place R12 2598.4 905.5 front 90)
+      (place R8 2716.5 787.4 front 90)
+    )
+    (component "SOT-23"
+      (place Q3 2007.9 708.7 front 0)
+      (place Q2 1378.0 708.7 front 0)
+      (place Q4 2637.8 708.7 front 0)
+      (place Q1 748.0 708.7 front 0)
+    )
+    (component CP_Radial_D6.3mm_P2.50mm
+      (place C1 2559.1 984.3 front 0)
+    )
+    (component LED_0805_2012Metric
+      (place LED3 1889.8 905.5 front 90)
+      (place LED4 2519.7 905.5 front 90)
+      (place LED2 1259.8 905.5 front 90)
+      (place LED1 629.9 905.5 front 90)
+    )
+    (component C_0805_2012Metric
+      (place C2 1574.8 1574.8 front 0)
+    )
+    (component PinSocket_1x20_P2.54mm_Vertical
+      (place J1 1574.8 1224.8 front 90)
+      (place J2 1574.8 1924.8 front 90)
+    )
+    (component PinHeader_1x06_P2.54mm_Vertical
+      (place J3 1574.8 157.5 front 90)
+    )
+    (component PinHeader_1x02_P2.54mm_Vertical
+      (place J7 2834.6 984.3 front 0)
+    )
+  )
+  (library
+    (image "DIP-4_W7.62mm"
+      (pin Round[A]Pad_63_um 1 0.0 0.0)
+      (pin Round[A]Pad_63_um 2 0.0 100.0)
+      (pin Round[A]Pad_63_um 3 300.0 100.0)
+      (pin Round[A]Pad_63_um 4 300.0 0.0)
+    )
+    (image R_0805_2012Metric
+      (pin Rect[T]Pad_40x55_um 1 35.9 0.0)
+      (pin Rect[T]Pad_40x55_um 2 -35.9 -0.0)
+    )
+    (image "SOT-23"
+      (pin Rect[T]Pad_58x24_um 1 -36.9 -37.4)
+      (pin Rect[T]Pad_58x24_um 2 -36.9 37.4)
+      (pin Rect[T]Pad_58x24_um 3 36.9 0.0)
+    )
+    (image CP_Radial_D6.3mm_P2.50mm
+      (pin Round[A]Pad_63_um 1 0.0 0.0)
+      (pin Round[A]Pad_63_um 2 98.4 0.0)
+    )
+    (image LED_0805_2012Metric
+      (pin Rect[T]Pad_38x55_um 1 36.9 0.0)
+      (pin Rect[T]Pad_38x55_um 2 -36.9 -0.0)
+    )
+    (image C_0805_2012Metric
+      (pin Rect[T]Pad_39x57_um 1 -37.4 0.0)
+      (pin Rect[T]Pad_39x57_um 2 37.4 0.0)
+    )
+    (image PinSocket_1x20_P2.54mm_Vertical
+      (pin Round[A]Pad_67_um 1 0.0 0.0)
+      (pin Round[A]Pad_67_um 2 0.0 -100.0)
+      (pin Round[A]Pad_67_um 3 0.0 -200.0)
+      (pin Round[A]Pad_67_um 4 0.0 -300.0)
+      (pin Round[A]Pad_67_um 5 0.0 -400.0)
+      (pin Round[A]Pad_67_um 6 0.0 -500.0)
+      (pin Round[A]Pad_67_um 7 0.0 -600.0)
+      (pin Round[A]Pad_67_um 8 0.0 -700.0)
+      (pin Round[A]Pad_67_um 9 0.0 -800.0)
+      (pin Round[A]Pad_67_um 10 0.0 -900.0)
+      (pin Round[A]Pad_67_um 11 0.0 -1000.0)
+      (pin Round[A]Pad_67_um 12 0.0 -1100.0)
+      (pin Round[A]Pad_67_um 13 0.0 -1200.0)
+      (pin Round[A]Pad_67_um 14 0.0 -1300.0)
+      (pin Round[A]Pad_67_um 15 0.0 -1400.0)
+      (pin Round[A]Pad_67_um 16 0.0 -1500.0)
+      (pin Round[A]Pad_67_um 17 0.0 -1600.0)
+      (pin Round[A]Pad_67_um 18 0.0 -1700.0)
+      (pin Round[A]Pad_67_um 19 0.0 -1800.0)
+      (pin Round[A]Pad_67_um 20 0.0 -1900.0)
+    )
+    (image PinHeader_1x06_P2.54mm_Vertical
+      (pin Round[A]Pad_67_um 1 0.0 0.0)
+      (pin Round[A]Pad_67_um 2 0.0 -100.0)
+      (pin Round[A]Pad_67_um 3 0.0 -200.0)
+      (pin Round[A]Pad_67_um 4 0.0 -300.0)
+      (pin Round[A]Pad_67_um 5 0.0 -400.0)
+      (pin Round[A]Pad_67_um 6 0.0 -500.0)
+    )
+    (image PinHeader_1x02_P2.54mm_Vertical
+      (pin Round[A]Pad_67_um 1 0.0 0.0)
+      (pin Round[A]Pad_67_um 2 0.0 100.0)
+    )
+    (padstack Round[A]Pad_63_um
+      (shape (circle F.Cu 63.0))
+      (shape (circle B.Cu 63.0))
+      (attach off)
+    )
+    (padstack Rect[T]Pad_40x55_um
+      (shape (rect F.Cu -20.2 -27.6 20.2 27.6))
+      (attach off)
+    )
+    (padstack Rect[T]Pad_58x24_um
+      (shape (rect F.Cu -29.0 -11.8 29.0 11.8))
+      (attach off)
+    )
+    (padstack Rect[T]Pad_38x55_um
+      (shape (rect F.Cu -19.2 -27.6 19.2 27.6))
+      (attach off)
+    )
+    (padstack Rect[T]Pad_39x57_um
+      (shape (rect F.Cu -19.7 -28.5 19.7 28.5))
+      (attach off)
+    )
+    (padstack Round[A]Pad_67_um
+      (shape (circle F.Cu 66.9))
+      (shape (circle B.Cu 66.9))
+      (attach off)
+    )
+    (padstack "Via[0-1]_600:300_um"
+      (shape (circle F.Cu 23.6))
+      (shape (circle B.Cu 23.6))
+      (attach off)
+    )
+  )
+  (network
+    (net "Net-(R13-Pad2)"
+      (pins U2-1 R13-2)
+    )
+    (net "Net-(R1-Pad1)"
+      (pins U2-3 R1-1)
+    )
+    (net "Net-(Q3-D)"
+      (pins R11-1 Q3-2 J3-5)
+    )
+    (net "Net-(LED3-K)"
+      (pins R11-2 LED3-1)
+    )
+    (net "Net-(R2-Pad1)"
+      (pins R2-1 U3-3)
+    )
+    (net "Net-(Q2-G)"
+      (pins R2-2 Q2-1 R6-1)
+    )
+    (net "Net-(R3-Pad1)"
+      (pins R3-1 U4-3)
+    )
+    (net "Net-(Q3-G)"
+      (pins R3-2 Q3-1 R7-1)
+    )
+    (net "Net-(R14-Pad2)"
+      (pins U3-1 R14-2)
+    )
+    (net "Net-(J1-Pin_14)"
+      (pins R13-1 J1-14)
+    )
+    (net "Net-(LED4-K)"
+      (pins LED4-1 R12-2)
+    )
+    (net "Net-(J2-Pin_16)"
+      (pins C2-1 J2-16)
+    )
+    (net "Net-(LED2-K)"
+      (pins LED2-1 R10-2)
+    )
+    (net "Net-(Q2-D)"
+      (pins R10-1 Q2-2 J3-4)
+    )
+    (net "Net-(LED1-K)"
+      (pins LED1-1 R9-2)
+    )
+    (net "Net-(J1-Pin_17)"
+      (pins R16-1 J1-17)
+    )
+    (net "Net-(R16-Pad2)"
+      (pins R16-2 U5-1)
+    )
+    (net "Net-(R4-Pad1)"
+      (pins R4-1 U5-3)
+    )
+    (net "Net-(Q4-G)"
+      (pins R4-2 Q4-1 R8-1)
+    )
+    (net "Net-(J1-Pin_15)"
+      (pins J1-15 R14-1)
+    )
+    (net "Net-(J1-Pin_16)"
+      (pins J1-16 R15-1)
+    )
+    (net "Net-(Q4-D)"
+      (pins Q4-2 J3-6 R12-1)
+    )
+    (net "Net-(Q1-G)"
+      (pins Q1-1 R1-2 R5-1)
+    )
+    (net "Net-(Q1-D)"
+      (pins Q1-2 J3-3 R9-1)
+    )
+    (net "Net-(R15-Pad2)"
+      (pins R15-2 U4-1)
+    )
+    (class default
+      "Net-(R13-Pad2)"
+      "Net-(R1-Pad1)"
+      "Net-(Q3-D)"
+      "Net-(LED3-K)"
+      "Net-(R2-Pad1)"
+      "Net-(Q2-G)"
+      "Net-(R3-Pad1)"
+      "Net-(Q3-G)"
+      "Net-(R14-Pad2)"
+      "Net-(J1-Pin_14)"
+      "Net-(LED4-K)"
+      "Net-(J2-Pin_16)"
+      "Net-(LED2-K)"
+      "Net-(Q2-D)"
+      "Net-(LED1-K)"
+      "Net-(J1-Pin_17)"
+      "Net-(R16-Pad2)"
+      "Net-(R4-Pad1)"
+      "Net-(Q4-G)"
+      "Net-(J1-Pin_15)"
+      "Net-(J1-Pin_16)"
+      "Net-(Q4-D)"
+      "Net-(Q1-G)"
+      "Net-(Q1-D)"
+      "Net-(R15-Pad2)"
+      (circuit (use_via "Via[0-1]_600:300_um"))
+      (rule (width 5.9) (clearance 5.9))
+    )
+  )
+  (wiring)
+)

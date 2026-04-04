@@ -1,3 +1,7 @@
 src/uecs_hardwares.egg-info/
 __pycache__/
 *.pyc
+# KiCad generated files
+fp-info-cache
+*.kicad_prl
+*-backups/
