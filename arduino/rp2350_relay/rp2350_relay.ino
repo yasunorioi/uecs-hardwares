@@ -24,7 +24,7 @@
 #include "sensor_registry.h"   // I2C センサーアドレス/HA フィールド定義
 
 // ========== Firmware Version ==========
-const char* FW_VERSION = "1.0.0";
+const char* FW_VERSION = "1.1.0";  // +WebUI
 const char* FW_NAME    = "rp2350_relay";
 
 // ========== Default Configuration ==========
@@ -60,6 +60,22 @@ const int RELAY_PINS[8] = {17, 18, 19, 20, 21, 22, 23, 24};
 // ========== DI GPIO Pins (GPIO9-16, アクティブLOW) ==========
 const int DI_PINS[8] = {9, 10, 11, 12, 13, 14, 15, 16};
 
+// ========== Channel Aliases (§8.1 RO, §8.2 DI) ==========
+const char* RO_NAMES[8] = {
+  "側窓A開", "側窓A閉", "側窓B開", "側窓B閉",
+  "電磁弁", "循環扇1", "循環扇2", "予備"
+};
+const char* RO_KEYS[8] = {
+  "side_window_a_open", "side_window_a_close",
+  "side_window_b_open", "side_window_b_close",
+  "solenoid_valve", "fan_1", "fan_2", "spare"
+};
+const char* DI_NAMES[8] = {
+  "灌水パルス1", "灌水パルス2",
+  "側窓A開端", "側窓A閉端", "側窓B開端", "側窓B閉端",
+  "予備DI7", "予備DI8"
+};
+
 // ========== Timing ==========
 const int          SENSOR_INTERVAL      = 10;       // seconds: heartbeat publish
 const int          ETH_CONNECT_TIMEOUT  = 15;       // seconds
@@ -78,7 +94,8 @@ unsigned long relayDurationEnd[8] = {0};
 
 bool diState[8]     = {false};
 bool diPrevState[8] = {false};
-volatile bool diInterruptFlag = false;
+volatile bool     diInterruptFlag  = false;
+volatile uint32_t diPulseCount[2]  = {0, 0};  // DI1-2 パルスカウント (flow meter)
 unsigned long diLastDebounce  = 0;
 const unsigned long DI_DEBOUNCE_MS = 50;
 
@@ -99,6 +116,7 @@ PubSubClient   mqttClient(wifiClient);
 WiFiUDP        ntpUDP;
 NTPClient      timeClient(ntpUDP, "pool.ntp.org", 0);  // UTC
 SensirionI2cSht4x sht4x;
+WiFiServer        webServer(80);
 
 String houseId;
 String nodeId;
@@ -125,13 +143,20 @@ bool rtcGetTime(struct tm* t);
 bool rtcSetTime(struct tm* t);
 unsigned long getCurrentEpoch();
 void rebootWithReason(const char* reason);
+void publishDIPulse();
+void handleWebClient();
+void sendDashboard(WiFiClient& client);
+void sendAPIState(WiFiClient& client);
+void handleRelayPost(WiFiClient& client, int ch, const String& body);
 
 // ============================================================
-// DI Interrupt (共有ISR — 全ch共通フラグ)
+// DI Interrupt
+// DI1-2: FALLING edge パルスカウント (流量計)
+// DI3-8: CHANGE 状態変化フラグ (リミットスイッチ等)
 // ============================================================
-void diISR() {
-  diInterruptFlag = true;
-}
+void diPulseISR1() { diPulseCount[0]++; }
+void diPulseISR2() { diPulseCount[1]++; }
+void diISR() { diInterruptFlag = true; }
 
 // ============================================================
 // PCF85063 RTC helpers
@@ -485,6 +510,25 @@ void publishSensorData() {
   mqttClient.publish(topic.c_str(), buffer);
 }
 
+void publishDIPulse() {
+  noInterrupts();
+  uint32_t c1 = diPulseCount[0]; diPulseCount[0] = 0;
+  uint32_t c2 = diPulseCount[1]; diPulseCount[1] = 0;
+  interrupts();
+
+  JsonDocument doc;
+  doc["count_di1"]    = c1;
+  doc["count_di2"]    = c2;
+  doc["interval_sec"] = SENSOR_INTERVAL;
+  doc["ts"]           = getCurrentEpoch();
+
+  char buffer[128];
+  serializeJson(doc, buffer);
+
+  String topic = String("agriha/") + houseId + "/di/pulse";
+  mqttClient.publish(topic.c_str(), buffer);
+}
+
 // ============================================================
 // HA MQTT Auto Discovery
 // ============================================================
@@ -510,7 +554,7 @@ void publishHADiscovery() {
     String cmdTopic = String("agriha/") + houseId + "/relay/" + ch + "/set";
 
     JsonDocument doc;
-    doc["name"]     = String("Relay CH") + ch;
+    doc["name"]     = RO_NAMES[ch - 1];
     doc["stat_t"]   = relayStateTopic;
     doc["cmd_t"]    = cmdTopic;
     doc["val_tpl"]  = String("{{ value_json.ch") + ch + " }}";
@@ -534,12 +578,14 @@ void publishHADiscovery() {
     String topic = String(PREFIX) + "/binary_sensor/" + uid + "/config";
 
     JsonDocument doc;
-    doc["name"]    = String("DI") + di;
+    doc["name"]    = DI_NAMES[di - 1];
     doc["stat_t"]  = diTopic;
     doc["val_tpl"] = String("{{ value_json.di") + di + " }}";
     doc["pl_on"]   = 1;
     doc["pl_off"]  = 0;
-    doc["dev_cla"] = "power";
+    // DI3-6: 窓リミットスイッチ → dev_cla="door"
+    // DI1-2: 流量パルス / DI7-8: 予備 → dev_cla="power"
+    doc["dev_cla"] = (di >= 3 && di <= 6) ? "door" : "power";
     doc["uniq_id"] = uid;
     doc["dev"]     = deviceDoc;
 
@@ -596,6 +642,222 @@ void rebootWithReason(const char* reason) {
 }
 
 // ============================================================
+// WebUI — HTML ダッシュボード
+// ============================================================
+static const char HTML_PAGE[] = R"RELAY_HTML(
+<!DOCTYPE html>
+<html><head>
+<meta charset=UTF-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>RP2350 Relay</title>
+<style>
+body{font-family:sans-serif;margin:16px;background:#1a1a2e;color:#e0e0e0}
+h2{color:#4fc3f7;margin:0 0 10px}h3{color:#90caf9;margin:6px 0}
+table{border-collapse:collapse;width:100%;margin:6px 0}
+th,td{border:1px solid #37474f;padding:5px 8px}
+th{background:#162447;color:#90caf9}
+.on{color:#66bb6a;font-weight:bold}.off{color:#ef5350}
+.bon{background:#43a047;color:#fff;border:none;padding:4px 8px;border-radius:3px;cursor:pointer}
+.bof{background:#e53935;color:#fff;border:none;padding:4px 8px;border-radius:3px;cursor:pointer}
+.sec{background:#162447;border-radius:6px;padding:12px;margin:8px 0}
+input[type=number]{width:55px;padding:3px;background:#263238;color:#eee;border:1px solid #546e7a;border-radius:3px}
+</style>
+</head><body>
+<h2>RP2350 Relay Node</h2>
+<div class=sec id=sys></div>
+<div class=sec>
+<h3>Relay Control / リレー制御</h3>
+<table><tr><th>CH</th><th>Name</th><th>State</th><th>Control</th></tr>
+<tbody id=rtbl></tbody></table>
+</div>
+<div class=sec>
+<h3>Digital Input / デジタル入力</h3>
+<table><tr><th>CH</th><th>Name</th><th>State</th></tr>
+<tbody id=dtbl></tbody></table>
+</div>
+<div class=sec id=sens></div>
+<script>
+var RO=['側窓A開','側窓A閉','側窓B開','側窓B閉','電磁弁','循環扇1','循環扇2','予備'];
+var DI=['灌水パルス1','灌水パルス2','側窓A開端','側窓A閉端','側窓B開端','側窓B閉端','予備DI7','予備DI8'];
+function relay(ch,v,dur){
+  var b={value:v};if(dur>0)b.duration_sec=dur;
+  fetch('/api/relay/'+ch,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}).then(load);
+}
+function load(){
+  fetch('/api/state').then(function(r){return r.json();}).then(function(d){
+    document.getElementById('sys').innerHTML=
+      '<b>Node:</b> '+d.node_id+' | <b>House:</b> '+d.house_id+
+      ' | <b>FW:</b> '+d.version+
+      ' | <b>MQTT:</b> <span class="'+(d.mqtt_ok?'on':'off')+'">'+(d.mqtt_ok?'OK':'FAIL')+'</span>'+
+      ' | <b>Uptime:</b> '+d.uptime+'s | <b>IP:</b> '+d.ip;
+    var rt='';
+    for(var i=1;i<=8;i++){
+      var s=d.relay['ch'+i];
+      rt+='<tr><td>'+i+'</td><td>'+RO[i-1]+'</td>'+
+        '<td class="'+(s?'on':'off')+'">'+(s?'ON':'OFF')+'</td>'+
+        '<td><button class=bon onclick="relay('+i+',1,0)">ON</button> '+
+        '<button class=bof onclick="relay('+i+',0,0)">OFF</button> '+
+        '<input id="d'+i+'" type=number value=30 min=1 max=3600>s '+
+        '<button class=bon onclick="relay('+i+',1,+document.getElementById(\'d'+i+'\').value)">ON+T</button></td></tr>';
+    }
+    document.getElementById('rtbl').innerHTML=rt;
+    var dt='';
+    for(var i=1;i<=8;i++){
+      var s=d.di['di'+i];
+      dt+='<tr><td>'+i+'</td><td>'+DI[i-1]+'</td><td class="'+(s?'on':'off')+'">'+(s?'ON':'OFF')+'</td></tr>';
+    }
+    document.getElementById('dtbl').innerHTML=dt;
+    var sv='<h3>Sensors / センサー</h3>';
+    if(d.sensor.temp!==null)sv+='<b>温度:</b> '+d.sensor.temp.toFixed(1)+'°C &nbsp;';
+    if(d.sensor.hum!==null)sv+='<b>湿度:</b> '+d.sensor.hum.toFixed(1)+'%';
+    if(!d.sensor.temp&&!d.sensor.hum)sv+='<span class=off>センサーなし</span>';
+    document.getElementById('sens').innerHTML=sv;
+  }).catch(function(){
+    document.getElementById('sys').innerHTML='<span class=off>通信エラー</span>';
+  });
+}
+load();setInterval(load,5000);
+</script>
+</body></html>
+)RELAY_HTML";
+
+void sendDashboard(WiFiClient& client) {
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: text/html; charset=UTF-8");
+  client.println("Connection: close");
+  client.println();
+  client.print(HTML_PAGE);
+}
+
+void sendAPIState(WiFiClient& client) {
+  JsonDocument doc;
+
+  JsonObject relay = doc["relay"].to<JsonObject>();
+  for (int i = 1; i <= 8; i++) {
+    relay[String("ch") + i] = (relayState >> (i - 1)) & 1;
+  }
+
+  JsonObject di = doc["di"].to<JsonObject>();
+  for (int i = 0; i < 8; i++) {
+    di[String("di") + (i + 1)] = diState[i] ? 1 : 0;
+  }
+
+  JsonObject sensor = doc["sensor"].to<JsonObject>();
+  if (!isnan(g_sht40_temp)) sensor["temp"] = round(g_sht40_temp * 10) / 10.0;
+  else                       sensor["temp"] = nullptr;
+  if (!isnan(g_sht40_hum))  sensor["hum"]  = round(g_sht40_hum * 10) / 10.0;
+  else                       sensor["hum"]  = nullptr;
+
+  doc["node_id"]  = nodeId;
+  doc["house_id"] = houseId;
+  doc["version"]  = FW_VERSION;
+  doc["mqtt_ok"]  = mqttClient.connected();
+  doc["uptime"]   = millis() / 1000;
+  doc["ip"]       = eth.localIP().toString();
+  doc["ts"]       = getCurrentEpoch();
+
+  char buffer[640];
+  serializeJson(doc, buffer);
+
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: application/json");
+  client.println("Access-Control-Allow-Origin: *");
+  client.println("Connection: close");
+  client.println();
+  client.print(buffer);
+}
+
+void handleRelayPost(WiFiClient& client, int ch, const String& body) {
+  if (ch < 1 || ch > 8) {
+    client.println("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n");
+    return;
+  }
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, body);
+  if (err) {
+    client.println("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n");
+    return;
+  }
+
+  int value = doc["value"] | -1;
+  int dur   = doc["duration_sec"] | 0;
+
+  if (value == 1) {
+    setRelay(ch, true);
+    relayDurationEnd[ch - 1] = (dur > 0) ? millis() + (unsigned long)dur * 1000UL : 0;
+  } else if (value == 0) {
+    setRelay(ch, false);
+    relayDurationEnd[ch - 1] = 0;
+  }
+  publishRelayState();
+
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: application/json");
+  client.println("Connection: close");
+  client.println();
+  client.printf("{\"ok\":true,\"ch\":%d}\n", ch);
+}
+
+void handleWebClient() {
+  WiFiClient client = webServer.accept();
+  if (!client) return;
+
+  client.setTimeout(500);
+  unsigned long t = millis();
+
+  // リクエスト行読み取り
+  while (!client.available() && (millis() - t) < 500) delay(1);
+  if (!client.available()) { client.stop(); return; }
+
+  String reqLine = client.readStringUntil('\n');
+  reqLine.trim();
+
+  // メソッド + パス解析
+  int sp1 = reqLine.indexOf(' ');
+  int sp2 = (sp1 >= 0) ? reqLine.indexOf(' ', sp1 + 1) : -1;
+  if (sp1 < 0 || sp2 < 0) { client.stop(); return; }
+
+  String method = reqLine.substring(0, sp1);
+  String path   = reqLine.substring(sp1 + 1, sp2);
+
+  // ヘッダー読み取り (Content-Length を取得)
+  int contentLength = 0;
+  while ((millis() - t) < 2000) {
+    String hdr = client.readStringUntil('\n');
+    hdr.trim();
+    if (hdr.length() == 0) break;
+    if (hdr.startsWith("Content-Length:")) {
+      contentLength = hdr.substring(15).toInt();
+    }
+  }
+
+  // ボディ読み取り
+  String body;
+  if (contentLength > 0) {
+    unsigned long bt = millis();
+    while ((int)body.length() < contentLength && (millis() - bt) < 1000) {
+      if (client.available()) body += (char)client.read();
+    }
+  }
+
+  // ルーティング
+  if (method == "GET" && (path == "/" || path == "/index.html")) {
+    sendDashboard(client);
+  } else if (method == "GET" && path == "/api/state") {
+    sendAPIState(client);
+  } else if (method == "POST" && path.startsWith("/api/relay/")) {
+    int ch = path.substring(11).toInt();
+    handleRelayPost(client, ch, body);
+  } else {
+    client.println("HTTP/1.1 404 Not Found\r\nConnection: close\r\n");
+  }
+
+  delay(1);
+  client.stop();
+}
+
+// ============================================================
 // Setup
 // ============================================================
 void setup() {
@@ -610,9 +872,15 @@ void setup() {
   // --- DI ピン初期化 + 割り込み設定 ---
   for (int i = 0; i < 8; i++) {
     pinMode(DI_PINS[i], INPUT_PULLUP);
+  }
+  // DI1-2: FALLING edge パルスカウント (流量計)
+  attachInterrupt(digitalPinToInterrupt(DI_PINS[0]), diPulseISR1, FALLING);
+  attachInterrupt(digitalPinToInterrupt(DI_PINS[1]), diPulseISR2, FALLING);
+  // DI3-8: CHANGE (リミットスイッチ・状態監視)
+  for (int i = 2; i < 8; i++) {
     attachInterrupt(digitalPinToInterrupt(DI_PINS[i]), diISR, CHANGE);
   }
-  Serial.println("DI: GPIO9-16, active LOW, interrupt CHANGE");
+  Serial.println("DI: GPIO9-10 pulse(FALLING), GPIO11-16 state(CHANGE)");
 
   // --- I2C0 (RTC + センサー) ---
   Wire.setSDA(I2C_SDA);
@@ -656,6 +924,11 @@ void setup() {
   mqttClient.setKeepAlive(60);
   mqttClient.setBufferSize(1024);
   connectMQTT();
+
+  // --- HTTP WebUI (port 80) ---
+  webServer.begin();
+  Serial.println("WebUI: http://");
+  Serial.println(eth.localIP().toString());
 
   // --- HA Discovery ---
   publishHADiscovery();
@@ -708,6 +981,9 @@ void loop() {
     rebootWithReason("eth_disconnected");
   }
 
+  // HTTP WebUI クライアント処理
+  handleWebClient();
+
   // MQTT チェック + 処理
   if (!mqttClient.connected()) {
     Serial.println("MQTT: disconnected, reconnecting...");
@@ -755,6 +1031,7 @@ void loop() {
 
     publishRelayState();
     publishDIState();
+    publishDIPulse();
     publishSensorData();
 
     Serial.printf("[%d] relay=0x%02X epoch=%lu uptime=%lus\n",
