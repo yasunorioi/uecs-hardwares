@@ -472,8 +472,8 @@ void publishSensorData() {
   if (!sht40_detected) return;
 
   JsonDocument doc;
-  if (!isnan(g_sht40_temp)) doc["temperature"] = round(g_sht40_temp * 100) / 100.0;
-  if (!isnan(g_sht40_hum))  doc["humidity"]    = round(g_sht40_hum  * 10)  / 10.0;
+  if (!isnan(g_sht40_temp)) doc["sht40_temperature"] = round(g_sht40_temp * 100) / 100.0;
+  if (!isnan(g_sht40_hum))  doc["sht40_humidity"]    = round(g_sht40_hum  * 10)  / 10.0;
   doc["house_id"] = houseId;
   doc["node_id"]  = nodeId;
   doc["ts"]       = getCurrentEpoch();
