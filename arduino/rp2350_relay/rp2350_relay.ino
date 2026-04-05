@@ -8,7 +8,7 @@
 //
 // Libraries: arduino-pico 4.5.2+, PubSubClient 2.8+,
 //            ArduinoJson 7.x, NTPClient 3.2.1, W5500lwIP (arduino-pico内蔵)
-//            SensirionI2cSht4x (optional)
+//            SensirionI2cSht4x (optional), LEAmDNS (arduino-pico内蔵)
 
 #include <SPI.h>
 #include <W5500lwIP.h>
@@ -19,12 +19,13 @@
 #include <NTPClient.h>
 #include <WiFiUdp.h>
 #include <SensirionI2cSht4x.h>
+#include <LEAmDNS.h>
 
 #include "sw_watchdog.h"        // Pico SDK: repeating_timer + watchdog_reboot (そのまま流用)
 #include "sensor_registry.h"   // I2C センサーアドレス/HA フィールド定義
 
 // ========== Firmware Version ==========
-const char* FW_VERSION = "1.1.0";  // +WebUI
+const char* FW_VERSION = "1.2.0";  // +mDNS +graceful sensor degradation +config WebUI
 const char* FW_NAME    = "rp2350_relay";
 
 // ========== Default Configuration ==========
@@ -36,6 +37,7 @@ const char* DEFAULT_IP           = "";          // 空=DHCP
 const char* DEFAULT_SUBNET       = "255.255.255.0";
 const char* DEFAULT_GATEWAY      = "192.168.15.1";
 const char* DEFAULT_DNS          = "8.8.8.8";
+const bool  DEFAULT_MDNS_ENABLED = true;
 
 // ========== W5500 SPI1 Pins (GPIO33-36, RP2350B高番号GPIO) ==========
 // 実機検証TODO: SPI1/SPI0どちらが正しいか要確認
@@ -46,6 +48,11 @@ const int W5500_MOSI = 35;
 const int W5500_MISO = 36;
 // W5500 INT: GPIO8 (公式コードに定義なし。実機確認TODO)
 const int W5500_INT  = -1;
+
+// ========== RS485 UART1 Pins (GPIO4/5, auto-direction transceiver) ==========
+const int RS485_TX = 4;
+const int RS485_RX = 5;
+const int RS485_DEFAULT_BAUD = 9600;
 
 // ========== I2C0 Pins (RTC PCF85063) ==========
 const int I2C_SDA = 6;
@@ -99,9 +106,12 @@ volatile uint32_t diPulseCount[2]  = {0, 0};  // DI1-2 パルスカウント (fl
 unsigned long diLastDebounce  = 0;
 const unsigned long DI_DEBOUNCE_MS = 50;
 
-bool sht40_detected = false;
-float g_sht40_temp  = NAN;
-float g_sht40_hum   = NAN;
+bool  sht40_detected    = false;
+int   sht40_error_count = 0;     // consecutive read errors; >= 3 → disable until reboot
+float g_sht40_temp      = NAN;
+float g_sht40_hum       = NAN;
+
+bool mdns_enabled = DEFAULT_MDNS_ENABLED;
 
 unsigned long ntpEpoch  = 0;   // NTP同期後のUTC epoch
 unsigned long ntpMillis = 0;   // 同期時のmillis()
@@ -123,6 +133,7 @@ String nodeId;
 String mqttBroker;
 int    mqttPort;
 String mqttClientId;
+int    rs485Baud = RS485_DEFAULT_BAUD;
 
 // ========== Function Declarations ==========
 void loadConfig();
@@ -147,7 +158,13 @@ void publishDIPulse();
 void handleWebClient();
 void sendDashboard(WiFiClient& client);
 void sendAPIState(WiFiClient& client);
+void sendAPIConfig(WiFiClient& client);
+void sendConfigPage(WiFiClient& client);
 void handleRelayPost(WiFiClient& client, int ch, const String& body);
+void handleConfigPost(WiFiClient& client, const String& body);
+void initRS485();
+void pollDrainSensor();
+uint16_t modbusCalcCRC(const uint8_t* data, size_t len);
 
 // ============================================================
 // DI Interrupt
@@ -272,13 +289,18 @@ bool readDI() {
 
 // ============================================================
 // I2C Sensor Scan
+// Wire.setTimeout prevents bus-stuck hang during scan.
 // ============================================================
 void scanI2CSensors() {
+  Wire.setTimeout(10);  // 10ms per transaction; prevents hang on stuck bus
   Serial.println("I2C scan:");
+  int found = 0;
   for (uint8_t addr = 1; addr < 127; addr++) {
     if (addr == PCF85063_ADDR) continue;  // RTC skip
     Wire.beginTransmission(addr);
-    if (Wire.endTransmission() == 0) {
+    uint8_t rc = Wire.endTransmission();
+    if (rc == 0) {
+      found++;
       Serial.printf("  0x%02X -> ", addr);
       bool matched = false;
       for (int i = 0; i < SENSOR_REGISTRY_SIZE; i++) {
@@ -291,6 +313,9 @@ void scanI2CSensors() {
       }
       if (!matched) Serial.println("unknown");
     }
+  }
+  if (found == 0) {
+    Serial.println("I2C scan: no devices found (sensor not connected — continuing)");
   }
   if (sht40_detected) {
     sht4x.begin(Wire, 0x44);
@@ -307,11 +332,101 @@ void readSensors() {
   err = sht4x.measureHighPrecision(temp, hum);
   if (err) {
     errorToString(err, msg, sizeof(msg));
-    Serial.printf("SHT40 error: %s\n", msg);
+    sht40_error_count++;
+    Serial.printf("SHT40 error (%d/3): %s\n", sht40_error_count, msg);
+    if (sht40_error_count >= 3) {
+      sht40_detected = false;
+      Serial.println("SHT40: disabled after 3 consecutive errors (will not retry until reboot)");
+    }
   } else {
+    sht40_error_count = 0;
     g_sht40_temp = temp;
     g_sht40_hum  = hum;
   }
+}
+
+// ============================================================
+// RS485 / Modbus RTU — Drain Sensor Polling Stub
+// UART1 (Serial2): TX=GPIO4, RX=GPIO5, auto-direction transceiver
+// Protocol: TBD (farmer sensor). Stub sends Modbus FC03 reg0x0000 to addr 0x01.
+// ============================================================
+
+// Modbus CRC16 (inline — no extra library)
+uint16_t modbusCalcCRC(const uint8_t* data, size_t len) {
+  uint16_t crc = 0xFFFF;
+  for (size_t i = 0; i < len; i++) {
+    crc ^= data[i];
+    for (int b = 0; b < 8; b++) {
+      if (crc & 0x0001) crc = (crc >> 1) ^ 0xA001;
+      else               crc >>= 1;
+    }
+  }
+  return crc;
+}
+
+void initRS485() {
+  Serial2.setTX(RS485_TX);
+  Serial2.setRX(RS485_RX);
+  Serial2.begin(rs485Baud);
+  Serial.printf("RS485: UART1 TX=GPIO%d RX=GPIO%d baud=%d\n",
+                RS485_TX, RS485_RX, rs485Baud);
+}
+
+// Poll drain sensor via Modbus RTU FC03 (stub — sensor model TBD).
+// Silently skips on timeout or CRC error; never crashes or reboots.
+void pollDrainSensor() {
+  // Modbus request: addr=0x01, FC=0x03, reg=0x0000, count=0x0001
+  uint8_t req[6];
+  req[0] = 0x01;  // slave address
+  req[1] = 0x03;  // function code: Read Holding Registers
+  req[2] = 0x00;  // register high
+  req[3] = 0x00;  // register low
+  req[4] = 0x00;  // count high
+  req[5] = 0x01;  // count low
+  uint16_t crc = modbusCalcCRC(req, 6);
+  uint8_t frame[8];
+  memcpy(frame, req, 6);
+  frame[6] = crc & 0xFF;
+  frame[7] = (crc >> 8) & 0xFF;
+
+  // Flush RX buffer before sending
+  while (Serial2.available()) Serial2.read();
+  Serial2.write(frame, 8);
+  Serial2.flush();
+
+  // Wait for response (timeout 500ms)
+  // Expected: addr(1) + FC(1) + byte_count(1) + data(2) + CRC(2) = 7 bytes
+  const int    RESP_LEN    = 7;
+  const unsigned long TIMEOUT_MS = 500UL;
+  uint8_t      resp[RESP_LEN];
+  int          received    = 0;
+  unsigned long deadline   = millis() + TIMEOUT_MS;
+
+  while (received < RESP_LEN && millis() < deadline) {
+    if (Serial2.available()) {
+      resp[received++] = (uint8_t)Serial2.read();
+    }
+  }
+
+  // No response → sensor not connected, skip silently
+  if (received < RESP_LEN) return;
+
+  // CRC check
+  uint16_t rxCRC = (uint16_t)resp[5] | ((uint16_t)resp[6] << 8);
+  if (modbusCalcCRC(resp, 5) != rxCRC) return;
+
+  // Parse 16-bit value (big-endian in Modbus payload)
+  uint16_t raw = ((uint16_t)resp[3] << 8) | resp[4];
+
+  // Publish to MQTT
+  if (!mqttClient.connected()) return;
+
+  char buffer[96];
+  snprintf(buffer, sizeof(buffer),
+           "{\"raw\":%u,\"ts\":%lu}", raw, getCurrentEpoch());
+  String topic = String("agriha/") + houseId + "/sensor/drain/state";
+  mqttClient.publish(topic.c_str(), buffer);
+  Serial.printf("Drain sensor raw=%u\n", raw);
 }
 
 // ============================================================
@@ -334,7 +449,9 @@ void loadConfig() {
         mqttBroker = (const char*)(doc["mqtt_broker"] | DEFAULT_MQTT_BROKER);
         mqttPort   = doc["mqtt_port"] | DEFAULT_MQTT_PORT;
         ipStr      = (const char*)(doc["ip"]          | DEFAULT_IP);
-        mqttClientId = String("rp2350-") + nodeId;
+        mqttClientId  = String("rp2350-") + nodeId;
+        rs485Baud     = doc["rs485_baud"] | RS485_DEFAULT_BAUD;
+        mdns_enabled  = doc["mdns_enabled"] | DEFAULT_MDNS_ENABLED;
 
         // Static IP設定 (ip フィールドがあれば適用)
         if (ipStr.length() > 0) {
@@ -624,6 +741,28 @@ void publishHADiscovery() {
     }
   }
 
+  // --- RS485 drain sensor (stub — always published for HA entity pre-registration) ---
+  {
+    String drainTopic = String("agriha/") + houseId + "/sensor/drain/state";
+    String uid        = String(nodeId.c_str()) + "_drain";
+    String topic      = String(PREFIX) + "/sensor/" + uid + "/config";
+
+    JsonDocument doc;
+    doc["name"]         = "排水センサー";
+    doc["stat_t"]       = drainTopic;
+    doc["val_tpl"]      = "{{ value_json.raw }}";
+    doc["unit_of_meas"] = "";
+    doc["ic"]           = "mdi:water-pump";
+    doc["uniq_id"]      = uid;
+    doc["dev"]          = deviceDoc;
+
+    char buffer[512];
+    serializeJson(doc, buffer);
+    mqttClient.publish(topic.c_str(), buffer, true);
+    Serial.printf("HA sensor/%s\n", uid.c_str());
+    delay(100);
+  }
+
   Serial.println("HA Discovery published");
 }
 
@@ -661,10 +800,13 @@ th{background:#162447;color:#90caf9}
 .bof{background:#e53935;color:#fff;border:none;padding:4px 8px;border-radius:3px;cursor:pointer}
 .sec{background:#162447;border-radius:6px;padding:12px;margin:8px 0}
 input[type=number]{width:55px;padding:3px;background:#263238;color:#eee;border:1px solid #546e7a;border-radius:3px}
+a{color:#90caf9}
 </style>
 </head><body>
 <h2>RP2350 Relay Node</h2>
 <div class=sec id=sys></div>
+<div class=sec id=net></div>
+<div class=sec id=devstat></div>
 <div class=sec>
 <h3>Relay Control / リレー制御</h3>
 <table><tr><th>CH</th><th>Name</th><th>State</th><th>Control</th></tr>
@@ -689,7 +831,23 @@ function load(){
       '<b>Node:</b> '+d.node_id+' | <b>House:</b> '+d.house_id+
       ' | <b>FW:</b> '+d.version+
       ' | <b>MQTT:</b> <span class="'+(d.mqtt_ok?'on':'off')+'">'+(d.mqtt_ok?'OK':'FAIL')+'</span>'+
-      ' | <b>Uptime:</b> '+d.uptime+'s | <b>IP:</b> '+d.ip;
+      ' | <b>Uptime:</b> '+d.uptime+'s'+
+      ' | <a href="/config">Config</a>';
+    var mdnsHost=d.mdns_hostname?(' | <b>mDNS:</b> '+d.mdns_hostname):'';
+    document.getElementById('net').innerHTML=
+      '<h3>Network</h3>'+
+      '<b>IP:</b> '+d.ip+
+      ' | <b>Subnet:</b> '+d.subnet+
+      ' | <b>GW:</b> '+d.gateway+
+      ' | <b>DNS:</b> '+d.dns+
+      mdnsHost+
+      '<br><b>MAC:</b> '+d.mac+
+      ' | <b>MQTT Broker:</b> '+d.mqtt_broker+':'+d.mqtt_port+
+      ' | <b>IP Mode:</b> '+(d.static_ip?'Static':'DHCP');
+    document.getElementById('devstat').innerHTML=
+      '<h3>Device Status</h3>'+
+      '<b>I2C Sensor:</b> '+(d.sht40_ok?'<span class=on>SHT40: detected</span>':'<span class=off>No sensors</span>')+
+      ' | <b>RS485:</b> <span style="color:#ffa726">RS485: not configured</span>';
     var rt='';
     for(var i=1;i<=8;i++){
       var s=d.relay['ch'+i];
@@ -748,15 +906,52 @@ void sendAPIState(WiFiClient& client) {
   if (!isnan(g_sht40_hum))  sensor["hum"]  = round(g_sht40_hum * 10) / 10.0;
   else                       sensor["hum"]  = nullptr;
 
-  doc["node_id"]  = nodeId;
-  doc["house_id"] = houseId;
-  doc["version"]  = FW_VERSION;
-  doc["mqtt_ok"]  = mqttClient.connected();
-  doc["uptime"]   = millis() / 1000;
-  doc["ip"]       = eth.localIP().toString();
-  doc["ts"]       = getCurrentEpoch();
+  doc["node_id"]       = nodeId;
+  doc["house_id"]      = houseId;
+  doc["version"]       = FW_VERSION;
+  doc["mqtt_ok"]       = mqttClient.connected();
+  doc["uptime"]        = millis() / 1000;
+  doc["ip"]            = eth.localIP().toString();
+  doc["subnet"]        = eth.subnetMask().toString();
+  doc["gateway"]       = eth.gatewayIP().toString();
+  doc["dns"]           = eth.dnsIP().toString();
+  doc["ts"]            = getCurrentEpoch();
+  doc["sht40_ok"]      = sht40_detected;
+  doc["mqtt_broker"]   = mqttBroker;
+  doc["mqtt_port"]     = mqttPort;
+  // static_ip: true if ip field was set in config (non-empty)
+  {
+    bool hasStatic = false;
+    if (LittleFS.exists("/config.json")) {
+      File f = LittleFS.open("/config.json", "r");
+      if (f) {
+        JsonDocument cfgDoc;
+        if (!deserializeJson(cfgDoc, f)) {
+          const char* ipField = cfgDoc["ip"] | "";
+          hasStatic = (ipField[0] != '\0');
+        }
+        f.close();
+      }
+    }
+    doc["static_ip"] = hasStatic;
+  }
+  // MAC address
+  {
+    uint8_t mac[6];
+    eth.macAddress(mac);
+    char macStr[18];
+    snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    doc["mac"] = macStr;
+  }
+  // mDNS hostname
+  if (mdns_enabled) {
+    doc["mdns_hostname"] = nodeId + ".local";
+  } else {
+    doc["mdns_hostname"] = nullptr;
+  }
 
-  char buffer[640];
+  char buffer[1024];
   serializeJson(doc, buffer);
 
   client.println("HTTP/1.1 200 OK");
@@ -797,6 +992,216 @@ void handleRelayPost(WiFiClient& client, int ch, const String& body) {
   client.println("Connection: close");
   client.println();
   client.printf("{\"ok\":true,\"ch\":%d}\n", ch);
+}
+
+// ============================================================
+// GET /api/config — return current config as JSON
+// ============================================================
+void sendAPIConfig(WiFiClient& client) {
+  JsonDocument doc;
+  doc["house_id"]     = houseId;
+  doc["node_id"]      = nodeId;
+  doc["mqtt_broker"]  = mqttBroker;
+  doc["mqtt_port"]    = mqttPort;
+  doc["mdns_enabled"] = mdns_enabled;
+
+  // Read IP fields from config.json if present
+  if (LittleFS.exists("/config.json")) {
+    File f = LittleFS.open("/config.json", "r");
+    if (f) {
+      JsonDocument cfgDoc;
+      if (!deserializeJson(cfgDoc, f)) {
+        doc["ip"]      = (const char*)(cfgDoc["ip"]      | "");
+        doc["subnet"]  = (const char*)(cfgDoc["subnet"]  | DEFAULT_SUBNET);
+        doc["gateway"] = (const char*)(cfgDoc["gateway"] | DEFAULT_GATEWAY);
+        doc["dns"]     = (const char*)(cfgDoc["dns"]     | DEFAULT_DNS);
+      }
+      f.close();
+    }
+  } else {
+    doc["ip"]      = "";
+    doc["subnet"]  = DEFAULT_SUBNET;
+    doc["gateway"] = DEFAULT_GATEWAY;
+    doc["dns"]     = DEFAULT_DNS;
+  }
+
+  char buffer[512];
+  serializeJson(doc, buffer);
+
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: application/json");
+  client.println("Access-Control-Allow-Origin: *");
+  client.println("Connection: close");
+  client.println();
+  client.print(buffer);
+}
+
+// ============================================================
+// GET /config — HTML config page
+// ============================================================
+void sendConfigPage(WiFiClient& client) {
+  // Read current values to pre-fill the form
+  String curIp, curSubnet, curGateway, curDns, curHouseId, curNodeId, curBroker;
+  int    curPort = mqttPort;
+  bool   curMdns = mdns_enabled;
+  curHouseId = houseId;
+  curNodeId  = nodeId;
+  curBroker  = mqttBroker;
+  curSubnet  = DEFAULT_SUBNET;
+  curGateway = DEFAULT_GATEWAY;
+  curDns     = DEFAULT_DNS;
+  if (LittleFS.exists("/config.json")) {
+    File f = LittleFS.open("/config.json", "r");
+    if (f) {
+      JsonDocument cfgDoc;
+      if (!deserializeJson(cfgDoc, f)) {
+        curIp      = (const char*)(cfgDoc["ip"]      | "");
+        curSubnet  = (const char*)(cfgDoc["subnet"]  | DEFAULT_SUBNET);
+        curGateway = (const char*)(cfgDoc["gateway"] | DEFAULT_GATEWAY);
+        curDns     = (const char*)(cfgDoc["dns"]     | DEFAULT_DNS);
+      }
+      f.close();
+    }
+  }
+
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: text/html; charset=UTF-8");
+  client.println("Connection: close");
+  client.println();
+  client.println("<!DOCTYPE html><html><head>");
+  client.println("<meta charset=UTF-8><meta name=viewport content='width=device-width,initial-scale=1'>");
+  client.println("<title>Config - RP2350 Relay</title>");
+  client.println("<style>body{font-family:sans-serif;margin:16px;background:#1a1a2e;color:#e0e0e0}");
+  client.println("h2{color:#4fc3f7}h3{color:#90caf9}");
+  client.println(".sec{background:#162447;border-radius:6px;padding:12px;margin:8px 0}");
+  client.println("label{display:block;margin:6px 0 2px}");
+  client.println("input[type=text],input[type=number]{width:220px;padding:4px;background:#263238;color:#eee;border:1px solid #546e7a;border-radius:3px}");
+  client.println("input[type=submit]{background:#1976d2;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer;margin-top:10px}");
+  client.println("a{color:#90caf9}.note{color:#90a4ae;font-size:0.85em}</style></head><body>");
+  client.println("<h2>Network &amp; MQTT Configuration</h2>");
+  client.printf("<p><a href='/'>&#8592; Dashboard</a> &nbsp; | &nbsp; Node: <b>%s</b></p>\n", nodeId.c_str());
+  client.println("<form method=POST action=/api/config>");
+  client.println("<div class=sec><h3>Identity</h3>");
+  client.printf("<label>house_id<input type=text name=house_id value='%s'></label>\n", curHouseId.c_str());
+  client.printf("<label>node_id<input type=text name=node_id value='%s'></label>\n", curNodeId.c_str());
+  client.println("</div>");
+  client.println("<div class=sec><h3>MQTT</h3>");
+  client.printf("<label>broker IP<input type=text name=mqtt_broker value='%s'></label>\n", curBroker.c_str());
+  client.printf("<label>port<input type=number name=mqtt_port min=1 max=65535 value='%d'></label>\n", curPort);
+  client.println("</div>");
+  client.println("<div class=sec><h3>IP Address</h3>");
+  client.println("<p class=note>Leave IP blank for DHCP. Fill IP to use static address.</p>");
+  client.printf("<label>IP (blank=DHCP)<input type=text name=ip value='%s' placeholder='e.g. 192.168.15.50'></label>\n", curIp.c_str());
+  client.printf("<label>Subnet<input type=text name=subnet value='%s'></label>\n", curSubnet.c_str());
+  client.printf("<label>Gateway<input type=text name=gateway value='%s'></label>\n", curGateway.c_str());
+  client.printf("<label>DNS<input type=text name=dns value='%s'></label>\n", curDns.c_str());
+  client.println("</div>");
+  client.println("<div class=sec><h3>mDNS</h3>");
+  client.printf("<label><input type=checkbox name=mdns_enabled value=1%s> Enable mDNS ({node_id}.local)</label>\n",
+                curMdns ? " checked" : "");
+  client.println("</div>");
+  client.println("<input type=submit value='Save &amp; Reboot'>");
+  client.println("</form>");
+  client.println("<p class=note>Device will reboot after saving.</p>");
+  client.println("</body></html>");
+}
+
+// ============================================================
+// POST /api/config — save config.json and reboot
+// Form-encoded body: house_id=...&node_id=...&mqtt_broker=...&mqtt_port=...
+//                    &ip=...&subnet=...&gateway=...&dns=...&mdns_enabled=1
+// ============================================================
+void handleConfigPost(WiFiClient& client, const String& body) {
+  // Simple URL-decode and form-field parse (no library needed for ASCII fields)
+  auto getField = [&](const String& key) -> String {
+    String search = key + "=";
+    int idx = body.indexOf(search);
+    if (idx < 0) return "";
+    idx += search.length();
+    int end = body.indexOf('&', idx);
+    if (end < 0) end = body.length();
+    String val = body.substring(idx, end);
+    // URL-decode '+' → space and %XX
+    val.replace('+', ' ');
+    String decoded;
+    for (int i = 0; i < (int)val.length(); i++) {
+      if (val[i] == '%' && i + 2 < (int)val.length()) {
+        char hex[3] = { val[i+1], val[i+2], '\0' };
+        decoded += (char)strtol(hex, nullptr, 16);
+        i += 2;
+      } else {
+        decoded += val[i];
+      }
+    }
+    return decoded;
+  };
+
+  String newHouseId    = getField("house_id");
+  String newNodeId     = getField("node_id");
+  String newBroker     = getField("mqtt_broker");
+  String newPortStr    = getField("mqtt_port");
+  String newIp         = getField("ip");
+  String newSubnet     = getField("subnet");
+  String newGateway    = getField("gateway");
+  String newDns        = getField("dns");
+  String newMdnsStr    = getField("mdns_enabled");
+
+  // Validate mandatory fields
+  if (newHouseId.length() == 0) newHouseId = houseId;
+  if (newNodeId.length() == 0)  newNodeId  = nodeId;
+  if (newBroker.length() == 0)  newBroker  = mqttBroker;
+  int newPort = (newPortStr.length() > 0) ? newPortStr.toInt() : mqttPort;
+  if (newPort < 1 || newPort > 65535) newPort = mqttPort;
+  if (newSubnet.length() == 0)  newSubnet  = DEFAULT_SUBNET;
+  if (newGateway.length() == 0) newGateway = DEFAULT_GATEWAY;
+  if (newDns.length() == 0)     newDns     = DEFAULT_DNS;
+  bool newMdns = (newMdnsStr == "1");
+
+  // Build and write config.json
+  JsonDocument doc;
+  doc["house_id"]     = newHouseId;
+  doc["node_id"]      = newNodeId;
+  doc["mqtt_broker"]  = newBroker;
+  doc["mqtt_port"]    = newPort;
+  doc["mdns_enabled"] = newMdns;
+  if (newIp.length() > 0) {
+    doc["ip"]      = newIp;
+    doc["subnet"]  = newSubnet;
+    doc["gateway"] = newGateway;
+    doc["dns"]     = newDns;
+  }
+  // Preserve rs485_baud if already set
+  if (LittleFS.exists("/config.json")) {
+    File rf = LittleFS.open("/config.json", "r");
+    if (rf) {
+      JsonDocument old;
+      if (!deserializeJson(old, rf) && !old["rs485_baud"].isNull()) {
+        doc["rs485_baud"] = old["rs485_baud"];
+      }
+      rf.close();
+    }
+  }
+
+  File f = LittleFS.open("/config.json", "w");
+  if (!f) {
+    client.println("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n");
+    return;
+  }
+  serializeJson(doc, f);
+  f.close();
+  Serial.println("Config saved via WebUI");
+
+  // Respond with redirect to dashboard (device will reboot shortly)
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: text/html; charset=UTF-8");
+  client.println("Connection: close");
+  client.println();
+  client.println("<!DOCTYPE html><html><head><meta charset=UTF-8></head><body>");
+  client.println("<p>Config saved. Rebooting...</p>");
+  client.println("</body></html>");
+  client.flush();
+  delay(500);
+  rebootWithReason("config_saved_via_webui");
 }
 
 void handleWebClient() {
@@ -846,6 +1251,12 @@ void handleWebClient() {
     sendDashboard(client);
   } else if (method == "GET" && path == "/api/state") {
     sendAPIState(client);
+  } else if (method == "GET" && path == "/api/config") {
+    sendAPIConfig(client);
+  } else if (method == "GET" && path == "/config") {
+    sendConfigPage(client);
+  } else if (method == "POST" && path == "/api/config") {
+    handleConfigPost(client, body);
   } else if (method == "POST" && path.startsWith("/api/relay/")) {
     int ch = path.substring(11).toInt();
     handleRelayPost(client, ch, body);
@@ -918,12 +1329,27 @@ void setup() {
   scanI2CSensors();
   readSensors();
 
+  // --- RS485 UART1 初期化 ---
+  initRS485();
+
   // --- MQTT ---
   mqttClient.setServer(mqttBroker.c_str(), mqttPort);
   mqttClient.setCallback(mqttCallback);
   mqttClient.setKeepAlive(60);
   mqttClient.setBufferSize(1024);
   connectMQTT();
+
+  // --- mDNS ({node_id}.local) ---
+  if (mdns_enabled) {
+    if (MDNS.begin(nodeId.c_str())) {
+      MDNS.addService("http", "tcp", 80);
+      Serial.printf("mDNS: %s.local\n", nodeId.c_str());
+    } else {
+      Serial.println("mDNS: begin failed (continuing without mDNS)");
+    }
+  } else {
+    Serial.println("mDNS: disabled by config");
+  }
 
   // --- HTTP WebUI (port 80) ---
   webServer.begin();
@@ -981,6 +1407,9 @@ void loop() {
     rebootWithReason("eth_disconnected");
   }
 
+  // mDNS update
+  if (mdns_enabled) MDNS.update();
+
   // HTTP WebUI クライアント処理
   handleWebClient();
 
@@ -1017,6 +1446,7 @@ void loop() {
     lastHeartbeat = now;
 
     readSensors();
+    pollDrainSensor();
 
     bool ok = mqttClient.publish("agriha/heartbeat", nodeId.c_str());
     if (!ok) {

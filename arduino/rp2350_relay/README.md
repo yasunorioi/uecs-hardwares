@@ -12,12 +12,15 @@ Arduino firmware for **Waveshare RP2350-ETH-8DI-8RO / RP2350-POE-ETH-8DI-8RO**.
 | 8ch デジタル入力 | GPIO9-16, フォトカプラ絶縁, アクティブLOW, **割り込み検知** |
 | 通信 | **Ethernet W5500 SPI1のみ** (WiFiなし / PoE給電) |
 | MQTT | PubSubClient 2.8+, subscribe wildcard |
-| HA Auto Discovery | 8ch switch + 8ch binary_sensor + I2Cセンサー |
+| HA Auto Discovery | 8ch switch + 8ch binary_sensor + I2Cセンサー + RS485排水センサー |
 | duration_sec | 指定秒後自動OFF (`mqtt_relay_bridge.py` 互換) |
 | 時刻 | PCF85063 RTC (I2C0: SDA=GPIO6, SCL=GPIO7) + NTP |
-| I2Cセンサー | SHT40 自動検出 (sensor_registry.h) |
+| I2Cセンサー | SHT40 自動検出 (sensor_registry.h) / バス固着耐性 / 連続3エラーで自動無効化 |
+| RS485排水センサー | UART1 (GPIO4/5), Modbus RTU FC03 ポーリングスタブ (センサー未接続時も安全) |
+| mDNS | `{node_id}.local` でアクセス可 (LEAmDNS / config で無効化可) |
+| WebUI config | `/config` ページから静的IP・MQTT・house_id/node_id を設定 → 保存後自動リブート |
 | Watchdog 3段 | HW WDT 8s (Pico SDK) / SW WDT sw_watchdog.h / 定期リブート 10分 |
-| 設定 | LittleFS /config.json (静的IP or DHCP) |
+| 設定 | LittleFS /config.json (静的IP or DHCP, mdns_enabled) |
 | フレームワーク | arduino-pico (Earle Philhower) — solar_node.ino と同じ技術スタック |
 
 ---
@@ -41,6 +44,7 @@ Arduino firmware for **Waveshare RP2350-ETH-8DI-8RO / RP2350-POE-ETH-8DI-8RO**.
 | NTPClient | 3.2.1 | Fabrice Weinberg |
 | SensirionI2cSht4x | latest | SHT40センサー用 (optional) |
 | W5500lwIP | arduino-pico内蔵 | 追加不要 |
+| LEAmDNS | arduino-pico内蔵 | 追加不要 (mDNS) |
 | Wire, LittleFS | arduino-pico内蔵 | 追加不要 |
 
 ---
@@ -77,7 +81,8 @@ arduino-cli compile \
 
 ## 設定ファイル (LittleFS /config.json)
 
-`ip` フィールドがあれば静的IP、なければDHCP。
+`ip` フィールドがあれば静的IP、なければDHCP。  
+WebUI `/config` ページから編集 → Save & Reboot で自動反映。
 
 ```json
 {
@@ -89,11 +94,31 @@ arduino-cli compile \
   "subnet": "255.255.255.0",
   "gateway": "192.168.15.1",
   "dns": "8.8.8.8",
-  "sensor_interval": 10
+  "sensor_interval": 10,
+  "rs485_baud": 9600,
+  "mdns_enabled": true
 }
 ```
 
 LittleFSアップロード: `arduino-pico` の "Upload Filesystem Image" メニュー (data/ フォルダに配置)
+
+---
+
+## WebUI エンドポイント
+
+| パス | メソッド | 説明 |
+|------|---------|------|
+| `/` | GET | ダッシュボード (IP/Subnet/GW/DNS/mDNS/MAC/センサー状態表示) |
+| `/config` | GET | 設定フォーム (MQTT/IP/house_id/node_id/mDNS) |
+| `/api/state` | GET | 状態JSON (relay, di, sensor, network情報, MAC, mDNS hostname) |
+| `/api/config` | GET | 現在設定JSON |
+| `/api/config` | POST | 設定保存 (form-encoded) → 自動リブート |
+| `/api/relay/{ch}` | POST | リレー制御JSON |
+
+### mDNS
+
+`mdns_enabled: true` (デフォルト) の場合、`http://{node_id}.local` でアクセス可能。  
+例: `http://waveshare_relay_01.local`
 
 ---
 
@@ -146,12 +171,19 @@ LittleFSアップロード: `arduino-pico` の "Upload Filesystem Image" メニ�
 | PCF85063 RTC | 0x51 | SDA=6, SCL=7 |
 | SHT40 | 0x44 | 同上 |
 
+### RS485 UART1 (排水センサー)
+
+| 機能 | GPIO | 備考 |
+|------|------|------|
+| RS485 TX | 4 | UART1 TX |
+| RS485 RX | 5 | UART1 RX |
+
+> DE/RE ピンはボード上に配線なし。トランシーバーによる自動方向制御。センサー未接続時も動作に影響なし。
+
 ### その他予約
 
 | 機能 | GPIO |
 |------|------|
-| RS485 TX (UART1) | 4 |
-| RS485 RX (UART1) | 5 |
 | WS2812 RGB LED | 2 |
 | ブザー | 3 |
 
@@ -165,6 +197,7 @@ LittleFSアップロード: `arduino-pico` の "Upload Filesystem Image" メニ�
 | `agriha/{house_id}/relay/state` | Pub | ✓ | 全ch状態 JSON |
 | `agriha/{house_id}/di/state` | Pub | ✓ | DI全ch状態 (変化時即送信) |
 | `agriha/{house_id}/sensor/relay_node/state` | Pub | — | SHT40データ |
+| `agriha/{house_id}/sensor/drain/state` | Pub | — | RS485排水センサー (センサー接続時のみ送信) |
 | `agriha/{node_id}/version` | Pub | ✓ | FWバージョン |
 | `agriha/heartbeat` | Pub | — | 死活監視 (10秒) |
 
@@ -212,6 +245,34 @@ arduino/rp2350_relay/
 
 ---
 
+## RS485 排水センサー
+
+UART1 (TX=GPIO4, RX=GPIO5) に RS485 トランシーバーを介して排水センサーを接続する。
+
+### 動作仕様
+
+- 電源投入時に `Serial2` を `rs485_baud` (デフォルト 9600bps) で初期化
+- `sensor_interval` 秒ごとに Modbus RTU FC03 リクエストをアドレス 0x01 へ送信
+  - レジスタ 0x0000、読み取り数 1
+- 500ms 以内にレスポンスがなければ無視 (センサー未接続 = 正常スキップ)
+- CRC エラー時も無視 (クラッシュ・リブートなし)
+- 正常受信時のみ MQTT へ publish: `agriha/{house_id}/sensor/drain/state`
+
+```json
+{"raw": 1234, "ts": 1740000000}
+```
+
+### HA Discovery
+
+entity: `sensor.{node_id}_drain` / icon: `mdi:water-pump` / unit: ""
+
+### センサー選定 (TBD)
+
+農家が購入するセンサーに応じて `raw` 値の変換式を追加実装すること。  
+Modbus スレーブアドレス・レジスタ番号が異なる場合は `pollDrainSensor()` 内の `req[]` を修正。
+
+---
+
 ## 実機検証 TODO
 
 - [ ] W5500 SPI1 (GPIO33-36) 動作確認 → 失敗時はSPI0に切替
@@ -222,5 +283,10 @@ arduino/rp2350_relay/
 - [ ] PCF85063 RTC I2C確認 (addr=0x51, GPIO6/7) + 日付設定完全実装
 - [ ] NTP同期 → ts フィールド確認
 - [ ] SHT40 自動検出 + HA Discoveryエンティティ確認
+- [ ] SHT40 バス固着時のタイムアウト動作確認 (Wire.setTimeout=10ms)
+- [ ] mDNS `{node_id}.local` アクセス確認
+- [ ] WebUI `/config` ページで静的IP設定 → リブート後確認
 - [ ] PoE給電動作確認 (PoE版)
+- [ ] RS485 排水センサー実機接続確認 (UART1 GPIO4/5, Modbus RTU FC03)
+- [ ] 排水センサー raw 値 → 物理量変換式の追加実装 (センサー確定後)
 - [ ] RS485/Modbus UECS CCM連携 (将来)
