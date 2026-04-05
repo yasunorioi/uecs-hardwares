@@ -245,31 +245,46 @@ arduino/rp2350_relay/
 
 ---
 
-## RS485 排水センサー
+## RS485 雨量/排水センサー (DFRobot SEN0575)
 
-UART1 (TX=GPIO4, RX=GPIO5) に RS485 トランシーバーを介して排水センサーを接続する。
+UART1 (TX=GPIO4, RX=GPIO5) に RS485 トランシーバーを介して DFRobot SEN0575 転倒ます型雨量計を接続する。
 
 ### 動作仕様
 
 - 電源投入時に `Serial2` を `rs485_baud` (デフォルト 9600bps) で初期化
-- `sensor_interval` 秒ごとに Modbus RTU FC03 リクエストをアドレス 0x01 へ送信
-  - レジスタ 0x0000、読み取り数 1
-- 500ms 以内にレスポンスがなければ無視 (センサー未接続 = 正常スキップ)
-- CRC エラー時も無視 (クラッシュ・リブートなし)
-- 正常受信時のみ MQTT へ publish: `agriha/{house_id}/sensor/drain/state`
+- 起動時に PID読み取り (FC04, addr=0xC0, reg=0x0000) でセンサー自動検出
+- 検出成功時: `sensor_interval` 秒ごとに以下3値を読み取り
+  - 累積降水量 (reg 0x0007-0x0008, 32bit ÷10000 = mm)
+  - 転倒ます回数 (reg 0x0009-0x000A, 32bit raw)
+  - センサー稼働時間 (reg 0x000B, ÷60 = hours)
+- 検出失敗時: ポーリングをスキップ (クラッシュ・リブートなし)
+- CRC エラー・タイムアウト時も無視して次サイクルで再試行
 
+### MQTT ペイロード
+
+`agriha/{house_id}/sensor/drain/state`:
 ```json
-{"raw": 1234, "ts": 1740000000}
+{"rainfall_mm": 12.50, "tips": 447, "work_hours": 168.5, "ts": 1740000000}
 ```
 
-### HA Discovery
+### HA Discovery (検出時のみ)
 
-entity: `sensor.{node_id}_drain` / icon: `mdi:water-pump` / unit: ""
+| Entity | val_tpl | unit | icon |
+|--------|---------|------|------|
+| `{node_id}_rainfall` | `rainfall_mm` | mm | mdi:weather-pouring |
+| `{node_id}_tips` | `tips` | tips | mdi:water-pump |
+| `{node_id}_work_hours` | `work_hours` | h | mdi:clock-outline |
 
-### センサー選定 (TBD)
+### SEN0575 Modbus プロトコル概要
 
-農家が購入するセンサーに応じて `raw` 値の変換式を追加実装すること。  
-Modbus スレーブアドレス・レジスタ番号が異なる場合は `pollDrainSensor()` 内の `req[]` を修正。
+| 項目 | 値 |
+|------|-----|
+| Modbus addr | 0xC0 |
+| Function Code | FC04 (Read Input Registers) |
+| Baud | 9600 8N1 |
+| PID | 0x000100C0 |
+| VID | 0x3343 |
+| 1tip = | 0.2794mm (設定可能)
 
 ---
 
@@ -287,6 +302,6 @@ Modbus スレーブアドレス・レジスタ番号が異なる場合は `pollD
 - [ ] mDNS `{node_id}.local` アクセス確認
 - [ ] WebUI `/config` ページで静的IP設定 → リブート後確認
 - [ ] PoE給電動作確認 (PoE版)
-- [ ] RS485 排水センサー実機接続確認 (UART1 GPIO4/5, Modbus RTU FC03)
-- [ ] 排水センサー raw 値 → 物理量変換式の追加実装 (センサー確定後)
+- [ ] RS485 SEN0575 実機接続確認 (UART1 GPIO4/5, Modbus RTU FC04, addr=0xC0)
+- [ ] SEN0575 PID自動検出 → HA Discovery 3エンティティ (rainfall/tips/work_hours) 確認
 - [ ] RS485/Modbus UECS CCM連携 (将来)

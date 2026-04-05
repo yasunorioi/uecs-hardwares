@@ -165,6 +165,8 @@ void handleConfigPost(WiFiClient& client, const String& body);
 void initRS485();
 void pollDrainSensor();
 uint16_t modbusCalcCRC(const uint8_t* data, size_t len);
+bool modbusReadInput(uint8_t addr, uint16_t reg, uint16_t count,
+                     uint16_t* out1, uint16_t* out2);
 
 // ============================================================
 // DI Interrupt
@@ -346,10 +348,32 @@ void readSensors() {
 }
 
 // ============================================================
-// RS485 / Modbus RTU — Drain Sensor Polling Stub
+// RS485 / Modbus RTU — DFRobot SEN0575 Rainfall/Drain Sensor
 // UART1 (Serial2): TX=GPIO4, RX=GPIO5, auto-direction transceiver
-// Protocol: TBD (farmer sensor). Stub sends Modbus FC03 reg0x0000 to addr 0x01.
+// Protocol: Modbus RTU, addr=0xC0, FC04 (Read Input Registers)
+// Datasheet: https://github.com/DFRobot/DFRobot_RainfallSensor
 // ============================================================
+
+// SEN0575 Modbus Input Register Map (FC04)
+// Addr  Name                     Bytes  Description
+// 0x00  PID_H                    2      Product ID high (expect 0x0001)
+// 0x01  PID_L                    2      Product ID low  (expect 0x00C0)
+// 0x02  VID_H                    2      Vendor ID high  (expect 0x3343)
+// 0x03  VID_L                    2      Vendor ID low
+// 0x04  FW Version               2      v(>>12).(>>8&0xF).(>>4&0xF).(&0xF)
+// 0x05  TimeRainfall_H           2      N-hour rainfall high (÷10000=mm)
+// 0x06  TimeRainfall_L           2      N-hour rainfall low
+// 0x07  CumulativeRainfall_H     2      Cumulative rainfall high (÷10000=mm)
+// 0x08  CumulativeRainfall_L     2      Cumulative rainfall low
+// 0x09  RawData_H                2      Tipping bucket count high
+// 0x0A  RawData_L                2      Tipping bucket count low
+// 0x0B  SysWorkingTime           2      Working time (÷60=hours)
+
+const uint8_t  SEN0575_ADDR        = 0xC0;
+const uint16_t SEN0575_REG_CUMRAIN_H = 0x0007;  // Cumulative rainfall high
+const uint16_t SEN0575_REG_RAWDATA_H = 0x0009;  // Raw tipping count high
+const uint16_t SEN0575_REG_SYSTIME   = 0x000B;  // System working time
+const uint16_t SEN0575_REG_PID_H     = 0x0000;  // PID for detection
 
 // Modbus CRC16 (inline — no extra library)
 uint16_t modbusCalcCRC(const uint8_t* data, size_t len) {
@@ -364,69 +388,120 @@ uint16_t modbusCalcCRC(const uint8_t* data, size_t len) {
   return crc;
 }
 
+bool     sen0575_detected = false;
+uint32_t sen0575_cumRainRaw   = 0;
+uint32_t sen0575_rawTips      = 0;
+uint16_t sen0575_workTimeMins = 0;
+
 void initRS485() {
   Serial2.setTX(RS485_TX);
   Serial2.setRX(RS485_RX);
   Serial2.begin(rs485Baud);
   Serial.printf("RS485: UART1 TX=GPIO%d RX=GPIO%d baud=%d\n",
                 RS485_TX, RS485_RX, rs485Baud);
+
+  // SEN0575 detection: read PID (FC04, reg 0x0000, count 2)
+  delay(100);
+  uint16_t pidH = 0, pidL = 0;
+  if (modbusReadInput(SEN0575_ADDR, SEN0575_REG_PID_H, 2, &pidH, &pidL)) {
+    uint32_t pid = ((uint32_t)pidH << 16) | pidL;
+    sen0575_detected = (pid == 0x000100C0);
+    Serial.printf("SEN0575: PID=0x%08lX %s\n", pid,
+                  sen0575_detected ? "DETECTED" : "PID mismatch");
+  } else {
+    Serial.println("SEN0575: not found (no response on RS485)");
+  }
 }
 
-// Poll drain sensor via Modbus RTU FC03 (stub — sensor model TBD).
-// Silently skips on timeout or CRC error; never crashes or reboots.
-void pollDrainSensor() {
-  // Modbus request: addr=0x01, FC=0x03, reg=0x0000, count=0x0001
+// Generic Modbus RTU FC04 (Read Input Registers) for 1 or 2 registers.
+// Returns true on valid response. out1/out2 receive 16-bit values (big-endian).
+bool modbusReadInput(uint8_t addr, uint16_t reg, uint16_t count,
+                     uint16_t* out1, uint16_t* out2) {
   uint8_t req[6];
-  req[0] = 0x01;  // slave address
-  req[1] = 0x03;  // function code: Read Holding Registers
-  req[2] = 0x00;  // register high
-  req[3] = 0x00;  // register low
-  req[4] = 0x00;  // count high
-  req[5] = 0x01;  // count low
+  req[0] = addr;
+  req[1] = 0x04;  // FC04: Read Input Registers
+  req[2] = (reg >> 8) & 0xFF;
+  req[3] = reg & 0xFF;
+  req[4] = (count >> 8) & 0xFF;
+  req[5] = count & 0xFF;
   uint16_t crc = modbusCalcCRC(req, 6);
   uint8_t frame[8];
   memcpy(frame, req, 6);
   frame[6] = crc & 0xFF;
   frame[7] = (crc >> 8) & 0xFF;
 
-  // Flush RX buffer before sending
   while (Serial2.available()) Serial2.read();
   Serial2.write(frame, 8);
   Serial2.flush();
 
-  // Wait for response (timeout 500ms)
-  // Expected: addr(1) + FC(1) + byte_count(1) + data(2) + CRC(2) = 7 bytes
-  const int    RESP_LEN    = 7;
-  const unsigned long TIMEOUT_MS = 500UL;
-  uint8_t      resp[RESP_LEN];
-  int          received    = 0;
-  unsigned long deadline   = millis() + TIMEOUT_MS;
+  // Response: addr(1) + FC(1) + byte_count(1) + data(count*2) + CRC(2)
+  const int respLen = 3 + count * 2 + 2;
+  uint8_t resp[11];  // max count=2 → 9 bytes
+  if (respLen > (int)sizeof(resp)) return false;
 
-  while (received < RESP_LEN && millis() < deadline) {
+  int received = 0;
+  unsigned long deadline = millis() + 1000UL;  // SEN0575 needs up to 1s
+  while (received < respLen && millis() < deadline) {
     if (Serial2.available()) {
       resp[received++] = (uint8_t)Serial2.read();
     }
   }
-
-  // No response → sensor not connected, skip silently
-  if (received < RESP_LEN) return;
+  if (received < respLen) return false;
 
   // CRC check
-  uint16_t rxCRC = (uint16_t)resp[5] | ((uint16_t)resp[6] << 8);
-  if (modbusCalcCRC(resp, 5) != rxCRC) return;
+  uint16_t rxCRC = (uint16_t)resp[respLen - 2] | ((uint16_t)resp[respLen - 1] << 8);
+  if (modbusCalcCRC(resp, respLen - 2) != rxCRC) return false;
 
-  // Parse 16-bit value (big-endian in Modbus payload)
-  uint16_t raw = ((uint16_t)resp[3] << 8) | resp[4];
+  // Validate: addr match, FC match, byte count match
+  if (resp[0] != addr || resp[1] != 0x04 || resp[2] != count * 2) return false;
+
+  *out1 = ((uint16_t)resp[3] << 8) | resp[4];
+  if (count >= 2 && out2) *out2 = ((uint16_t)resp[5] << 8) | resp[6];
+
+  return true;
+}
+
+// Poll SEN0575: cumulative rainfall + raw tips + working time
+// Silently skips if sensor not detected or communication fails.
+void pollDrainSensor() {
+  if (!sen0575_detected) return;
+
+  // Read cumulative rainfall (2 registers: high + low)
+  uint16_t cumH = 0, cumL = 0;
+  if (modbusReadInput(SEN0575_ADDR, SEN0575_REG_CUMRAIN_H, 2, &cumH, &cumL)) {
+    sen0575_cumRainRaw = ((uint32_t)cumH << 16) | cumL;
+  }
+
+  delay(50);
+
+  // Read raw tipping count (2 registers: high + low)
+  uint16_t rawH = 0, rawL = 0;
+  if (modbusReadInput(SEN0575_ADDR, SEN0575_REG_RAWDATA_H, 2, &rawH, &rawL)) {
+    sen0575_rawTips = ((uint32_t)rawH << 16) | rawL;
+  }
+
+  delay(50);
+
+  // Read working time (1 register)
+  uint16_t wt = 0;
+  if (modbusReadInput(SEN0575_ADDR, SEN0575_REG_SYSTIME, 1, &wt, nullptr)) {
+    sen0575_workTimeMins = wt;
+  }
 
   // Publish to MQTT
   if (!mqttClient.connected()) return;
 
-  char buffer[96];
+  float rainfall_mm = sen0575_cumRainRaw / 10000.0;
+  float workHours   = sen0575_workTimeMins / 60.0;
+
+  char buffer[192];
   snprintf(buffer, sizeof(buffer),
-           "{\"raw\":%u,\"ts\":%lu}", raw, getCurrentEpoch());
+           "{\"rainfall_mm\":%.2f,\"tips\":%lu,\"work_hours\":%.1f,\"ts\":%lu}",
+           rainfall_mm, (unsigned long)sen0575_rawTips, workHours, getCurrentEpoch());
   String topic = String("agriha/") + houseId + "/sensor/drain/state";
   mqttClient.publish(topic.c_str(), buffer);
-  Serial.printf("Drain sensor raw=%u\n", raw);
+  Serial.printf("SEN0575: rain=%.2fmm tips=%lu work=%.1fh\n",
+                rainfall_mm, (unsigned long)sen0575_rawTips, workHours);
 }
 
 // ============================================================
@@ -741,26 +816,66 @@ void publishHADiscovery() {
     }
   }
 
-  // --- RS485 drain sensor (stub — always published for HA entity pre-registration) ---
-  {
+  // --- SEN0575 Rainfall/Drain sensor (3 entities) ---
+  if (sen0575_detected) {
     String drainTopic = String("agriha/") + houseId + "/sensor/drain/state";
-    String uid        = String(nodeId.c_str()) + "_drain";
-    String topic      = String(PREFIX) + "/sensor/" + uid + "/config";
 
-    JsonDocument doc;
-    doc["name"]         = "排水センサー";
-    doc["stat_t"]       = drainTopic;
-    doc["val_tpl"]      = "{{ value_json.raw }}";
-    doc["unit_of_meas"] = "";
-    doc["ic"]           = "mdi:water-pump";
-    doc["uniq_id"]      = uid;
-    doc["dev"]          = deviceDoc;
-
-    char buffer[512];
-    serializeJson(doc, buffer);
-    mqttClient.publish(topic.c_str(), buffer, true);
-    Serial.printf("HA sensor/%s\n", uid.c_str());
-    delay(100);
+    // 1. Cumulative rainfall (mm)
+    {
+      String uid   = String(nodeId.c_str()) + "_rainfall";
+      String topic = String(PREFIX) + "/sensor/" + uid + "/config";
+      JsonDocument doc;
+      doc["name"]         = "累積降水量";
+      doc["stat_t"]       = drainTopic;
+      doc["val_tpl"]      = "{{ value_json.rainfall_mm }}";
+      doc["unit_of_meas"] = "mm";
+      doc["dev_cla"]      = "precipitation";
+      doc["ic"]           = "mdi:weather-pouring";
+      doc["uniq_id"]      = uid;
+      doc["dev"]          = deviceDoc;
+      char buffer[512];
+      serializeJson(doc, buffer);
+      mqttClient.publish(topic.c_str(), buffer, true);
+      Serial.printf("HA sensor/%s\n", uid.c_str());
+      delay(100);
+    }
+    // 2. Tipping bucket count
+    {
+      String uid   = String(nodeId.c_str()) + "_tips";
+      String topic = String(PREFIX) + "/sensor/" + uid + "/config";
+      JsonDocument doc;
+      doc["name"]         = "転倒ます回数";
+      doc["stat_t"]       = drainTopic;
+      doc["val_tpl"]      = "{{ value_json.tips }}";
+      doc["unit_of_meas"] = "tips";
+      doc["ic"]           = "mdi:water-pump";
+      doc["uniq_id"]      = uid;
+      doc["dev"]          = deviceDoc;
+      char buffer[512];
+      serializeJson(doc, buffer);
+      mqttClient.publish(topic.c_str(), buffer, true);
+      Serial.printf("HA sensor/%s\n", uid.c_str());
+      delay(100);
+    }
+    // 3. Sensor working hours
+    {
+      String uid   = String(nodeId.c_str()) + "_work_hours";
+      String topic = String(PREFIX) + "/sensor/" + uid + "/config";
+      JsonDocument doc;
+      doc["name"]         = "センサー稼働時間";
+      doc["stat_t"]       = drainTopic;
+      doc["val_tpl"]      = "{{ value_json.work_hours }}";
+      doc["unit_of_meas"] = "h";
+      doc["dev_cla"]      = "duration";
+      doc["ic"]           = "mdi:clock-outline";
+      doc["uniq_id"]      = uid;
+      doc["dev"]          = deviceDoc;
+      char buffer[512];
+      serializeJson(doc, buffer);
+      mqttClient.publish(topic.c_str(), buffer, true);
+      Serial.printf("HA sensor/%s\n", uid.c_str());
+      delay(100);
+    }
   }
 
   Serial.println("HA Discovery published");
@@ -847,7 +962,7 @@ function load(){
     document.getElementById('devstat').innerHTML=
       '<h3>Device Status</h3>'+
       '<b>I2C Sensor:</b> '+(d.sht40_ok?'<span class=on>SHT40: detected</span>':'<span class=off>No sensors</span>')+
-      ' | <b>RS485:</b> <span style="color:#ffa726">RS485: not configured</span>';
+      ' | <b>RS485:</b> '+(d.sen0575_ok?'<span class=on>SEN0575: detected</span>':'<span class=off>SEN0575: not found</span>');
     var rt='';
     for(var i=1;i<=8;i++){
       var s=d.relay['ch'+i];
@@ -917,6 +1032,7 @@ void sendAPIState(WiFiClient& client) {
   doc["dns"]           = eth.dnsIP().toString();
   doc["ts"]            = getCurrentEpoch();
   doc["sht40_ok"]      = sht40_detected;
+  doc["sen0575_ok"]    = sen0575_detected;
   doc["mqtt_broker"]   = mqttBroker;
   doc["mqtt_port"]     = mqttPort;
   // static_ip: true if ip field was set in config (non-empty)
