@@ -22,6 +22,9 @@
 #include <SensirionI2cSht4x.h>
 #include <LEAmDNS.h>
 #include <Updater.h>
+#include <Adafruit_NeoPixel.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
 #include "sw_watchdog.h"
 #include "sensor_registry.h"
@@ -63,6 +66,13 @@ const int RS485_DEFAULT_BAUD = 9600;
 const int I2C_SDA = 6;  // I2C1 SDA (not I2C0 — GPIO6 is I2C1 per RP2350 pinmux)
 const int I2C_SCL = 7;  // I2C1 SCL
 
+// ========== WS2812 RGB LED ==========
+const int WS2812_PIN = 2;   // GPIO2 (onboard)
+const int WS2812_NUM = 1;   // 1 LED
+
+// ========== DS18B20 OneWire ==========
+const int ONEWIRE_PIN = 3;  // GPIO3 (Grove基板から引出し)
+
 // ========== PCF85063 RTC ==========
 const uint8_t PCF85063_ADDR = 0x51;
 
@@ -82,6 +92,8 @@ struct CcmMapping {
   int      priority;
   char     suffix[8];     // ".cMC", ".mC", ".MC" — default ".cMC"
   int      watchdog_sec;  // 無通信タイマー秒 (0=無効, >0: 最終CCM受信からN秒でOFF)
+  int      di_link;      // DI連動 (-1=なし, 0-7=DI番号, ON→リレーON)
+  bool     di_invert;    // DI反転 (true: DI ON→リレーOFF, フロートスイッチ等)
 };
 
 // ArSprout標準のアクチュエータタイプ
@@ -120,6 +132,9 @@ int   sht40_error_count = 0;
 float g_sht40_temp      = NAN;
 float g_sht40_hum       = NAN;
 
+bool  ds18b20_detected  = false;
+float g_ds18b20_temp    = NAN;
+
 bool mdns_enabled = DEFAULT_MDNS_ENABLED;
 
 unsigned long ntpEpoch  = 0;
@@ -137,6 +152,9 @@ WiFiUDP        ccmUDP;      // CCM multicast send/receive
 WiFiUDP        ntpUDP;
 NTPClient      timeClient(ntpUDP, "pool.ntp.org", 0);
 SensirionI2cSht4x sht4x;
+Adafruit_NeoPixel rgbLED(WS2812_NUM, WS2812_PIN, NEO_GRB + NEO_KHZ800);
+OneWire           oneWire(ONEWIRE_PIN);
+DallasTemperature ds18b20(&oneWire);
 WiFiServer        webServer(80);
 
 String nodeId;
@@ -336,23 +354,36 @@ void scanI2CSensors() {
 }
 
 void readSensors() {
-  if (!sht40_detected) return;
-  float temp, hum;
-  uint16_t err;
-  char msg[64];
-  err = sht4x.measureHighPrecision(temp, hum);
-  if (err) {
-    errorToString(err, msg, sizeof(msg));
-    sht40_error_count++;
-    Serial.printf("SHT40 error (%d/3): %s\n", sht40_error_count, msg);
-    if (sht40_error_count >= 3) {
-      sht40_detected = false;
-      Serial.println("SHT40: disabled after 3 errors");
+  // SHT40 (I2C)
+  if (sht40_detected) {
+    float temp, hum;
+    uint16_t err;
+    char msg[64];
+    err = sht4x.measureHighPrecision(temp, hum);
+    if (err) {
+      errorToString(err, msg, sizeof(msg));
+      sht40_error_count++;
+      Serial.printf("SHT40 error (%d/3): %s\n", sht40_error_count, msg);
+      if (sht40_error_count >= 3) {
+        sht40_detected = false;
+        Serial.println("SHT40: disabled after 3 errors");
+      }
+    } else {
+      sht40_error_count = 0;
+      g_sht40_temp = temp;
+      g_sht40_hum  = hum;
     }
-  } else {
-    sht40_error_count = 0;
-    g_sht40_temp = temp;
-    g_sht40_hum  = hum;
+  }
+
+  // DS18B20 (OneWire)
+  if (ds18b20_detected) {
+    ds18b20.requestTemperatures();
+    float t = ds18b20.getTempCByIndex(0);
+    if (t != DEVICE_DISCONNECTED_C && t > -55.0 && t < 125.0) {
+      g_ds18b20_temp = t;
+    } else {
+      g_ds18b20_temp = NAN;
+    }
   }
 }
 
@@ -512,6 +543,18 @@ void ccmSendStates() {
     }
   }
 
+  // DS18B20 (OneWire) — 外部温度としてCCM送信
+  if (ds18b20_detected && !isnan(g_ds18b20_temp)) {
+    int room = (ccmMap[0].ccmType[0] != '\0') ? ccmMap[0].room : 2;
+    xml += "<DATA type=\"InAirTemp.cMC\" room=\"";
+    xml += room;
+    xml += "\" region=\"12\" order=\"2\" priority=\"29\" lv=\"S\" cast=\"uni\">";
+    char dsBuf[8];
+    dtostrf(g_ds18b20_temp, 1, 1, dsBuf);
+    xml += dsBuf;
+    xml += "</DATA>";
+  }
+
   // SEN0575 rainfall as WRainfallAmt (weather rainfall amount)
   if (sen0575_detected) {
     float rainfall_mm = sen0575_cumRainRaw / 10000.0;
@@ -657,6 +700,8 @@ void loadCcmMapping() {
     ccmMap[i].order    = 1;
     ccmMap[i].priority = 1;
     ccmMap[i].watchdog_sec = 60;
+    ccmMap[i].di_link      = -1;
+    ccmMap[i].di_invert    = false;
     strncpy(ccmMap[i].suffix, ".cMC", sizeof(ccmMap[i].suffix));
   }
 
@@ -688,6 +733,8 @@ void loadCcmMapping() {
     ccmMap[idx].order    = ch["order"]    | 1;
     ccmMap[idx].priority     = ch["priority"]     | 1;
     ccmMap[idx].watchdog_sec = ch["watchdog_sec"] | 60;
+    ccmMap[idx].di_link      = ch["di_link"]      | -1;
+    ccmMap[idx].di_invert    = ch["di_invert"]    | false;
     const char* sfx = ch["suffix"] | ".cMC";
     strncpy(ccmMap[idx].suffix, sfx, sizeof(ccmMap[idx].suffix) - 1);
     ccmMap[idx].suffix[sizeof(ccmMap[idx].suffix) - 1] = '\0';
@@ -716,6 +763,8 @@ void saveCcmMapping() {
     ch["order"]    = ccmMap[i].order;
     ch["priority"]     = ccmMap[i].priority;
     ch["watchdog_sec"] = ccmMap[i].watchdog_sec;
+    ch["di_link"]      = ccmMap[i].di_link;
+    ch["di_invert"]    = ccmMap[i].di_invert;
     ch["suffix"]       = ccmMap[i].suffix;
   }
 
@@ -887,6 +936,7 @@ function load(){
     document.getElementById('devstat').innerHTML=
       '<h3>Device Status</h3>'+
       '<b>I2C:</b> '+(d.sht40_ok?'<span class=on>SHT40</span>':'<span class=off>none</span>')+
+      ' | <b>1-Wire:</b> '+(d.ds18b20_ok?'<span class=on>DS18B20</span>':'<span class=off>none</span>')+
       ' | <b>RS485:</b> '+(d.sen0575_ok?'<span class=on>SEN0575</span>':'<span class=off>none</span>');
     var rt='';
     var ccm=d.ccm_map||[];
@@ -909,9 +959,10 @@ function load(){
     }
     document.getElementById('dtbl').innerHTML=dt;
     var sv='<h3>Sensors</h3>';
-    if(d.sensor&&d.sensor.temp!==null)sv+='<b>Temp:</b> '+d.sensor.temp.toFixed(1)+'C ';
-    if(d.sensor&&d.sensor.hum!==null)sv+='<b>Hum:</b> '+d.sensor.hum.toFixed(1)+'%';
-    if(d.sensor&&d.sensor.temp===null&&d.sensor.hum===null)sv+='<span class=off>No sensors</span>';
+    if(d.sensor&&d.sensor.temp!==null)sv+='<b>SHT40 Temp:</b> '+d.sensor.temp.toFixed(1)+'C ';
+    if(d.sensor&&d.sensor.hum!==null)sv+='<b>Hum:</b> '+d.sensor.hum.toFixed(1)+'% ';
+    if(d.sensor&&d.sensor.ds18b20_temp!==null)sv+='<b>DS18B20:</b> '+d.sensor.ds18b20_temp.toFixed(1)+'C ';
+    if(d.sensor&&d.sensor.temp===null&&d.sensor.hum===null&&d.sensor.ds18b20_temp===null)sv+='<span class=off>No sensors</span>';
     document.getElementById('sens').innerHTML=sv;
   });
 }
@@ -967,14 +1018,17 @@ void sendAPIState(WiFiClient& client) {
   else                       sensor["temp"] = nullptr;
   if (!isnan(g_sht40_hum))  sensor["hum"]  = round(g_sht40_hum * 10) / 10.0;
   else                       sensor["hum"]  = nullptr;
+  if (!isnan(g_ds18b20_temp)) sensor["ds18b20_temp"] = round(g_ds18b20_temp * 10) / 10.0;
+  else                         sensor["ds18b20_temp"] = nullptr;
 
   // Network
   doc["ip"]      = eth.localIP().toString();
   doc["subnet"]  = eth.subnetMask().toString();
   doc["gateway"] = eth.gatewayIP().toString();
   doc["dns"]     = eth.dnsIP().toString();
-  doc["sht40_ok"]   = sht40_detected;
-  doc["sen0575_ok"] = sen0575_detected;
+  doc["sht40_ok"]    = sht40_detected;
+  doc["ds18b20_ok"]  = ds18b20_detected;
+  doc["sen0575_ok"]  = sen0575_detected;
 
   // MAC
   {
@@ -1152,7 +1206,7 @@ void sendCcmConfigPage(WiFiClient& client) {
   client.println(" <button type=button onclick=\"var v=document.getElementById('bulkRegion').value;if(v)for(var i=0;i<8;i++)document.getElementsByName('region'+i)[0].value=v;\">Apply to All</button>");
   client.println("</div>");
   client.println("<form method=POST action=/api/ccm>");
-  client.println("<table><tr><th>CH</th><th>CCM Type</th><th>Room</th><th>Region</th><th>Order</th><th>Priority</th><th>WDT(s)</th></tr>");
+  client.println("<table><tr><th>CH</th><th>CCM Type</th><th>Room</th><th>Region</th><th>Order</th><th>Priority</th><th>WDT(s)</th><th>DI Link</th></tr>");
 
   for (int i = 0; i < 8; i++) {
     client.printf("<tr><td>%d</td><td><select name=type%d>", i + 1, i);
@@ -1168,7 +1222,15 @@ void sendCcmConfigPage(WiFiClient& client) {
     client.printf("<td><input type=number name=region%d value=%d min=1 max=999></td>", i, ccmMap[i].region);
     client.printf("<td><input type=number name=order%d value=%d min=1 max=99></td>", i, ccmMap[i].order);
     client.printf("<td><input type=number name=pri%d value=%d min=1 max=99></td>", i, ccmMap[i].priority);
-    client.printf("<td><input type=number name=wdt%d value=%d min=0 max=3600></td></tr>", i, ccmMap[i].watchdog_sec);
+    client.printf("<td><input type=number name=wdt%d value=%d min=0 max=3600></td>", i, ccmMap[i].watchdog_sec);
+    // DI Link dropdown: -1=none, 0-7=DI1-8, + invert checkbox
+    client.printf("<td><select name=dil%d>", i);
+    client.printf("<option value=-1%s>none</option>", ccmMap[i].di_link < 0 ? " selected" : "");
+    for (int d = 0; d < 8; d++) {
+      client.printf("<option value=%d%s>DI%d</option>", d, ccmMap[i].di_link == d ? " selected" : "", d + 1);
+    }
+    client.printf("</select> <label><input type=checkbox name=dii%d value=1%s>inv</label></td></tr>",
+                  i, ccmMap[i].di_invert ? " checked" : "");
   }
 
   client.println("</table>");
@@ -1308,6 +1370,13 @@ void handleCcmConfigPost(WiFiClient& client, const String& body) {
 
     String w = getField(String("wdt") + i);
     if (w.length() > 0) ccmMap[i].watchdog_sec = w.toInt();
+
+    String dl = getField(String("dil") + i);
+    if (dl.length() > 0) ccmMap[i].di_link = dl.toInt();
+
+    // Checkbox: present=1, absent=not in form data
+    String di = getField(String("dii") + i);
+    ccmMap[i].di_invert = (di == "1");
   }
 
   saveCcmMapping();
@@ -1557,6 +1626,23 @@ void setup() {
   initEthernet();
   syncNTP();
   scanI2CSensors();
+
+  // DS18B20 (OneWire on GPIO3)
+  ds18b20.begin();
+  if (ds18b20.getDeviceCount() > 0) {
+    ds18b20_detected = true;
+    ds18b20.setResolution(12);
+    Serial.printf("DS18B20: %d device(s) on GPIO%d\n", ds18b20.getDeviceCount(), ONEWIRE_PIN);
+  } else {
+    Serial.println("DS18B20: not found (continuing)");
+  }
+
+  // RGB LED
+  rgbLED.begin();
+  rgbLED.setBrightness(30);  // 控えめ
+  rgbLED.setPixelColor(0, rgbLED.Color(0, 0, 50));  // 起動中=青
+  rgbLED.show();
+
   readSensors();
   initRS485();
 
@@ -1642,7 +1728,21 @@ void loop() {
   if (diInterruptFlag && (now - diLastDebounce >= DI_DEBOUNCE_MS)) {
     diInterruptFlag = false;
     diLastDebounce  = now;
-    readDI();
+    if (readDI()) {
+      // DI→リレー連動
+      for (int i = 0; i < 8; i++) {
+        if (ccmMap[i].di_link < 0 || ccmMap[i].di_link > 7) continue;
+        bool di_on = diState[ccmMap[i].di_link];
+        bool target = ccmMap[i].di_invert ? !di_on : di_on;
+        bool current = (relayState >> i) & 1;
+        if (target != current) {
+          setRelay(i + 1, target);
+          Serial.printf("[DI-LINK] DI%d=%s → CH%d %s\n",
+                        ccmMap[i].di_link + 1, di_on ? "ON" : "OFF",
+                        i + 1, target ? "ON" : "OFF");
+        }
+      }
+    }
   }
 
   // Periodic: sensor read + CCM broadcast
@@ -1696,6 +1796,20 @@ void loop() {
     } else {
       serialCmd += c;
     }
+  }
+
+  // RGB LED status: 緑=正常, 赤=Ethernet断, 黄=リレーON中, 青=起動直後
+  static unsigned long lastLedUpdate = 0;
+  if (now - lastLedUpdate >= 1000) {
+    lastLedUpdate = now;
+    if (!eth.connected()) {
+      rgbLED.setPixelColor(0, rgbLED.Color(80, 0, 0));    // 赤=Ethernet断
+    } else if (relayState > 0) {
+      rgbLED.setPixelColor(0, rgbLED.Color(60, 40, 0));   // 黄=リレー稼働中
+    } else {
+      rgbLED.setPixelColor(0, rgbLED.Color(0, 50, 0));    // 緑=正常待機
+    }
+    rgbLED.show();
   }
 
   delay(50);
