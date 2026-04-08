@@ -648,8 +648,8 @@ void ccmReceive() {
 void loadCcmMapping() {
   // Initialize defaults
   for (int i = 0; i < 8; i++) {
-    ccmMap[i].ccmType[0] = '\0';
-    ccmMap[i].room     = 1;
+    strncpy(ccmMap[i].ccmType, "Relay", sizeof(ccmMap[i].ccmType) - 1);
+    ccmMap[i].room     = 2;
     ccmMap[i].region   = 61;
     ccmMap[i].order    = 1;
     ccmMap[i].priority = 1;
@@ -657,7 +657,7 @@ void loadCcmMapping() {
   }
 
   if (!LittleFS.exists("/ccm_map.json")) {
-    Serial.println("CCM map: no config, using defaults (all unmapped)");
+    Serial.println("CCM map: no config, using defaults (all Relay, room=2)");
     return;
   }
 
