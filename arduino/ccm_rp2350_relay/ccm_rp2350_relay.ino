@@ -152,6 +152,51 @@ struct IrriRuntime {
 };
 IrriRuntime irriRun[IRRI_SLOTS];
 
+// ========== Dew Prevention (結露対策) ==========
+// 日の出前に循環扇/暖房を起動して結露を防止
+struct DewPreventionCtrl {
+  bool   enabled;
+  float  latitude;         // 緯度 (度、北半球+)
+  float  longitude;        // 経度 (度、東経+)
+  int    timezone_h;       // UTC offset (JST=9)
+  int    before_sunrise_min; // 日の出の何分前に開始 (default 30)
+  int    after_sunrise_min;  // 日の出の何分後に停止 (default 60)
+  int    fan_relay_ch;     // 循環扇リレーch (0-7, -1=無効)
+  int    heater_relay_ch;  // 暖房リレーch (0-7, -1=無効)
+};
+
+DewPreventionCtrl dewCtrl;
+
+// ランタイム
+struct DewRuntime {
+  int   sunrise_min;       // 今日の日の出時刻 (ローカル時、0時からの分)
+  int   last_calc_day;     // 最後に計算した日 (day_of_year)
+  bool  active;            // 結露対策稼働中
+};
+DewRuntime dewRun = {0, -1, false};
+
+// ========== Temp Rate Guard (温度急変対策) ==========
+// 温度変化率が閾値を超えたらリレー制御
+struct TempRateGuard {
+  bool   enabled;
+  float  rate_threshold;   // ℃/分 の閾値 (e.g. 2.0 = 2℃/分以上で発動)
+  int    fan_relay_ch;     // 換気扇リレーch (0-7, -1=無効)
+  int    sensor_src;       // 0=SHT40, 1=DS18B20
+  int    hold_sec;         // 発動後の最小保持時間 (秒)
+};
+
+TempRateGuard rateGuard;
+
+// ランタイム
+struct RateRuntime {
+  float  prev_temp;        // 前回温度
+  unsigned long prev_time; // 前回時刻 (millis)
+  float  current_rate;     // 現在の変化率 (℃/分)
+  bool   active;           // ガード発動中
+  unsigned long active_since; // 発動開始時刻
+};
+RateRuntime rateRun = {NAN, 0, 0.0, false, 0};
+
 // ========== Timing ==========
 const int           SENSOR_INTERVAL      = 10;
 const int           ETH_CONNECT_TIMEOUT  = 15;
@@ -270,6 +315,15 @@ void irrigationControl(unsigned long now);
 void sendIrrigationPage(WiFiClient& client);
 void handleIrrigationPost(WiFiClient& client, const String& body);
 float readADS1110();
+int calcSunriseMinLocal(int dayOfYear, float lat, float lon, int tz_h);
+void loadDewConfig();
+void saveDewConfig();
+void dewPreventionControl(unsigned long now);
+void loadRateGuardConfig();
+void saveRateGuardConfig();
+void tempRateGuardControl(unsigned long now);
+void sendProtectionPage(WiFiClient& client);
+void handleProtectionPost(WiFiClient& client, const String& body);
 
 // ============================================================
 // DI Interrupt
@@ -1093,6 +1147,226 @@ void irrigationControl(unsigned long now) {
 }
 
 // ============================================================
+// NOAA Sunrise Calculation (solareqns.PDF)
+// ============================================================
+int calcSunriseMinLocal(int dayOfYear, float lat, float lon, int tz_h) {
+  // Fractional year (γ) in radians
+  float gamma = 2.0 * PI / 365.0 * (dayOfYear - 1);
+
+  // Equation of time (minutes)
+  float eqtime = 229.18 * (0.000075 + 0.001868 * cos(gamma) - 0.032077 * sin(gamma)
+                 - 0.014615 * cos(2 * gamma) - 0.040849 * sin(2 * gamma));
+
+  // Solar declination (radians)
+  float decl = 0.006918 - 0.399912 * cos(gamma) + 0.070257 * sin(gamma)
+               - 0.006758 * cos(2 * gamma) + 0.000907 * sin(2 * gamma)
+               - 0.002697 * cos(3 * gamma) + 0.00148 * sin(3 * gamma);
+
+  // Hour angle for sunrise (degrees)
+  float latRad = lat * PI / 180.0;
+  float zenith = 90.833 * PI / 180.0;  // atmospheric refraction correction
+  float cosHA = (cos(zenith) / (cos(latRad) * cos(decl))) - tan(latRad) * tan(decl);
+
+  if (cosHA > 1.0) return -1;   // no sunrise (polar night)
+  if (cosHA < -1.0) return -1;  // no sunset (midnight sun)
+
+  float ha = acos(cosHA) * 180.0 / PI;  // degrees, positive = sunrise
+
+  // Sunrise UTC in minutes
+  float sunriseUTC = 720.0 - 4.0 * (lon + ha) - eqtime;
+
+  // Convert to local time
+  int sunriseLocal = (int)(sunriseUTC + tz_h * 60.0);
+  if (sunriseLocal < 0) sunriseLocal += 1440;
+  if (sunriseLocal >= 1440) sunriseLocal -= 1440;
+  return sunriseLocal;
+}
+
+// ============================================================
+// Dew Prevention — Config & Logic
+// ============================================================
+void loadDewConfig() {
+  dewCtrl.enabled           = false;
+  dewCtrl.latitude          = 43.0;   // 北海道デフォルト
+  dewCtrl.longitude         = 141.3;
+  dewCtrl.timezone_h        = 9;      // JST
+  dewCtrl.before_sunrise_min = 30;
+  dewCtrl.after_sunrise_min  = 60;
+  dewCtrl.fan_relay_ch      = -1;
+  dewCtrl.heater_relay_ch   = -1;
+
+  if (!LittleFS.exists("/dew_ctrl.json")) return;
+  File f = LittleFS.open("/dew_ctrl.json", "r");
+  if (!f) return;
+  JsonDocument doc;
+  if (deserializeJson(doc, f)) { f.close(); return; }
+  f.close();
+  dewCtrl.enabled           = doc["enabled"]    | false;
+  dewCtrl.latitude          = doc["lat"]        | 43.0;
+  dewCtrl.longitude         = doc["lon"]        | 141.3;
+  dewCtrl.timezone_h        = doc["tz"]         | 9;
+  dewCtrl.before_sunrise_min = doc["before_min"] | 30;
+  dewCtrl.after_sunrise_min  = doc["after_min"]  | 60;
+  dewCtrl.fan_relay_ch      = doc["fan_ch"]     | -1;
+  dewCtrl.heater_relay_ch   = doc["heater_ch"]  | -1;
+  Serial.printf("Dew: lat=%.2f lon=%.2f tz=%d before=%d after=%d\n",
+                dewCtrl.latitude, dewCtrl.longitude, dewCtrl.timezone_h,
+                dewCtrl.before_sunrise_min, dewCtrl.after_sunrise_min);
+}
+
+void saveDewConfig() {
+  JsonDocument doc;
+  doc["enabled"]    = dewCtrl.enabled;
+  doc["lat"]        = dewCtrl.latitude;
+  doc["lon"]        = dewCtrl.longitude;
+  doc["tz"]         = dewCtrl.timezone_h;
+  doc["before_min"] = dewCtrl.before_sunrise_min;
+  doc["after_min"]  = dewCtrl.after_sunrise_min;
+  doc["fan_ch"]     = dewCtrl.fan_relay_ch;
+  doc["heater_ch"]  = dewCtrl.heater_relay_ch;
+  File f = LittleFS.open("/dew_ctrl.json", "w");
+  if (!f) return;
+  serializeJson(doc, f);
+  f.close();
+  Serial.println("Dew config saved");
+}
+
+void dewPreventionControl(unsigned long now) {
+  if (!dewCtrl.enabled) return;
+  unsigned long epoch = getCurrentEpoch();
+  if (epoch == 0) return;  // NTP未同期
+
+  // ローカル時刻 (分)
+  int localSec = (epoch + dewCtrl.timezone_h * 3600L) % 86400L;
+  int localMin = localSec / 60;
+
+  // 日の出時刻を1日1回再計算
+  int dayOfYear = ((epoch + dewCtrl.timezone_h * 3600L) / 86400L) % 365 + 1;
+  if (dayOfYear != dewRun.last_calc_day) {
+    dewRun.sunrise_min = calcSunriseMinLocal(dayOfYear, dewCtrl.latitude,
+                                              dewCtrl.longitude, dewCtrl.timezone_h);
+    dewRun.last_calc_day = dayOfYear;
+    Serial.printf("[DEW] day=%d sunrise=%d:%02d local\n",
+                  dayOfYear, dewRun.sunrise_min / 60, dewRun.sunrise_min % 60);
+  }
+
+  if (dewRun.sunrise_min < 0) return;  // 極夜
+
+  int startMin = dewRun.sunrise_min - dewCtrl.before_sunrise_min;
+  int endMin   = dewRun.sunrise_min + dewCtrl.after_sunrise_min;
+  if (startMin < 0) startMin += 1440;
+
+  // 時間帯内か判定
+  bool inWindow;
+  if (startMin < endMin) {
+    inWindow = (localMin >= startMin && localMin < endMin);
+  } else {
+    // 日をまたぐ場合 (e.g. 23:30-05:30)
+    inWindow = (localMin >= startMin || localMin < endMin);
+  }
+
+  if (inWindow && !dewRun.active) {
+    dewRun.active = true;
+    if (dewCtrl.fan_relay_ch >= 0 && dewCtrl.fan_relay_ch <= 7)
+      setRelay(dewCtrl.fan_relay_ch + 1, true);
+    if (dewCtrl.heater_relay_ch >= 0 && dewCtrl.heater_relay_ch <= 7)
+      setRelay(dewCtrl.heater_relay_ch + 1, true);
+    Serial.printf("[DEW] ON — sunrise=%d:%02d now=%d:%02d\n",
+                  dewRun.sunrise_min / 60, dewRun.sunrise_min % 60,
+                  localMin / 60, localMin % 60);
+  } else if (!inWindow && dewRun.active) {
+    dewRun.active = false;
+    if (dewCtrl.fan_relay_ch >= 0 && dewCtrl.fan_relay_ch <= 7)
+      setRelay(dewCtrl.fan_relay_ch + 1, false);
+    if (dewCtrl.heater_relay_ch >= 0 && dewCtrl.heater_relay_ch <= 7)
+      setRelay(dewCtrl.heater_relay_ch + 1, false);
+    Serial.printf("[DEW] OFF — window ended\n");
+  }
+}
+
+// ============================================================
+// Temp Rate Guard — Config & Logic
+// ============================================================
+void loadRateGuardConfig() {
+  rateGuard.enabled        = false;
+  rateGuard.rate_threshold = 2.0;   // 2℃/分
+  rateGuard.fan_relay_ch   = -1;
+  rateGuard.sensor_src     = 0;     // SHT40
+  rateGuard.hold_sec       = 120;   // 2分保持
+
+  if (!LittleFS.exists("/rate_ctrl.json")) return;
+  File f = LittleFS.open("/rate_ctrl.json", "r");
+  if (!f) return;
+  JsonDocument doc;
+  if (deserializeJson(doc, f)) { f.close(); return; }
+  f.close();
+  rateGuard.enabled        = doc["enabled"]   | false;
+  rateGuard.rate_threshold = doc["threshold"]  | 2.0;
+  rateGuard.fan_relay_ch   = doc["fan_ch"]     | -1;
+  rateGuard.sensor_src     = doc["sensor_src"] | 0;
+  rateGuard.hold_sec       = doc["hold_sec"]   | 120;
+  Serial.printf("RateGuard: threshold=%.1f℃/min fan=CH%d hold=%ds\n",
+                rateGuard.rate_threshold, rateGuard.fan_relay_ch + 1, rateGuard.hold_sec);
+}
+
+void saveRateGuardConfig() {
+  JsonDocument doc;
+  doc["enabled"]    = rateGuard.enabled;
+  doc["threshold"]  = rateGuard.rate_threshold;
+  doc["fan_ch"]     = rateGuard.fan_relay_ch;
+  doc["sensor_src"] = rateGuard.sensor_src;
+  doc["hold_sec"]   = rateGuard.hold_sec;
+  File f = LittleFS.open("/rate_ctrl.json", "w");
+  if (!f) return;
+  serializeJson(doc, f);
+  f.close();
+  Serial.println("RateGuard config saved");
+}
+
+void tempRateGuardControl(unsigned long now) {
+  if (!rateGuard.enabled || rateGuard.fan_relay_ch < 0) return;
+
+  float temp = (rateGuard.sensor_src == 0) ? g_sht40_temp : g_ds18b20_temp;
+  if (isnan(temp)) return;
+
+  // 初回
+  if (isnan(rateRun.prev_temp) || rateRun.prev_time == 0) {
+    rateRun.prev_temp = temp;
+    rateRun.prev_time = now;
+    return;
+  }
+
+  // 10秒以上経過で変化率計算
+  unsigned long dt_ms = now - rateRun.prev_time;
+  if (dt_ms < 10000) return;
+
+  float dt_min = dt_ms / 60000.0;
+  rateRun.current_rate = (temp - rateRun.prev_temp) / dt_min;
+  rateRun.prev_temp = temp;
+  rateRun.prev_time = now;
+
+  // 急上昇検知 → 換気扇ON
+  if (!rateRun.active && rateRun.current_rate >= rateGuard.rate_threshold) {
+    rateRun.active = true;
+    rateRun.active_since = now;
+    setRelay(rateGuard.fan_relay_ch + 1, true);
+    Serial.printf("[RATE] ON — %.2f℃/min >= %.1f threshold\n",
+                  rateRun.current_rate, rateGuard.rate_threshold);
+  }
+
+  // 保持時間経過 かつ 変化率が閾値未満 → OFF
+  if (rateRun.active) {
+    bool holdDone = (now - rateRun.active_since) >= (unsigned long)rateGuard.hold_sec * 1000UL;
+    bool rateLow  = rateRun.current_rate < rateGuard.rate_threshold;
+    if (holdDone && rateLow) {
+      rateRun.active = false;
+      setRelay(rateGuard.fan_relay_ch + 1, false);
+      Serial.printf("[RATE] OFF — rate=%.2f℃/min, hold done\n", rateRun.current_rate);
+    }
+  }
+}
+
+// ============================================================
 // Configuration (LittleFS /config.json)
 // ============================================================
 void loadConfig() {
@@ -1232,6 +1506,7 @@ a{color:#d0d6e0}
 <div class=sec id=sens></div>
 <div class=sec id=gh></div>
 <div class=sec id=irri></div>
+<div class=sec id=prot></div>
 <script>
 function relay(ch,v){
   fetch('/api/relay/'+ch,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:v})}).then(load);
@@ -1242,7 +1517,7 @@ function load(){
       '<b>Node:</b> '+d.node_id+' | <b>FW:</b> '+d.version+
       ' | <b>Protocol:</b> <span style="color:#ffa726">UECS-CCM</span>'+
       ' | <b>Uptime:</b> '+d.uptime+'s'+
-      ' | <a href="/config">Network</a> | <a href="/ccm">CCM</a> | <a href="/greenhouse">Greenhouse</a> | <a href="/irrigation">Irrigation</a> | <a href="/ota">FW</a>';
+      ' | <a href="/config">Network</a> | <a href="/ccm">CCM</a> | <a href="/greenhouse">Greenhouse</a> | <a href="/irrigation">Irrigation</a> | <a href="/protection">Protection</a> | <a href="/ota">FW</a>';
     var mdnsHost=d.mdns_hostname?(' | <b>mDNS:</b> '+d.mdns_hostname):'';
     document.getElementById('net').innerHTML=
       '<h3>Network</h3><b>IP:</b> '+d.ip+
@@ -1317,6 +1592,21 @@ function load(){
       document.getElementById('irri').innerHTML=iv;
     } else {
       document.getElementById('irri').innerHTML='<h3>Solar Irrigation</h3><span class=off>Not configured</span> — <a href="/irrigation">Configure</a>';
+    }
+    var p=d.protection||{};
+    var pv='<h3>Protection</h3>';
+    var anyP=false;
+    if(p.dew&&p.dew.enabled){anyP=true;
+      pv+='<b>Dew:</b> '+(p.dew.active?'<span class=on>ACTIVE</span>':'Standby');
+      if(p.dew.sunrise)pv+=' (sunrise '+p.dew.sunrise+') ';
+      pv+=' | ';}
+    if(p.rate&&p.rate.enabled){anyP=true;
+      pv+='<b>Rate Guard:</b> '+(p.rate.active?'<span class=on>ACTIVE</span>':'Normal');
+      if(p.rate.current_rate!==null)pv+=' ('+p.rate.current_rate.toFixed(1)+'C/min)';}
+    if(anyP){pv+=' — <a href="/protection">Settings</a>';
+      document.getElementById('prot').innerHTML=pv;
+    }else{
+      document.getElementById('prot').innerHTML='<h3>Protection</h3><span class=off>Not configured</span> — <a href="/protection">Configure</a>';
     }
   });
 }
@@ -1434,7 +1724,25 @@ void sendAPIState(WiFiClient& client) {
     }
   }
 
-  char buffer[3072];
+  // Protection status (Dew + Rate Guard)
+  JsonObject prot = doc["protection"].to<JsonObject>();
+  {
+    JsonObject dew = prot["dew"].to<JsonObject>();
+    dew["enabled"] = dewCtrl.enabled;
+    dew["active"]  = dewRun.active;
+    if (dewRun.sunrise_min >= 0) {
+      char sr[6];
+      snprintf(sr, sizeof(sr), "%d:%02d", dewRun.sunrise_min / 60, dewRun.sunrise_min % 60);
+      dew["sunrise"] = sr;
+    }
+    JsonObject rate = prot["rate"].to<JsonObject>();
+    rate["enabled"] = rateGuard.enabled;
+    rate["active"]  = rateRun.active;
+    if (!isnan(rateRun.prev_temp)) rate["current_rate"] = round(rateRun.current_rate * 100) / 100.0;
+    else rate["current_rate"] = nullptr;
+  }
+
+  char buffer[4096];
   serializeJson(doc, buffer);
 
   client.println("HTTP/1.1 200 OK");
@@ -2043,6 +2351,150 @@ void handleIrrigationPost(WiFiClient& client, const String& body) {
 }
 
 // ============================================================
+// Protection Page (GET /protection) — Dew + Rate Guard
+// ============================================================
+void sendProtectionPage(WiFiClient& client) {
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: text/html");
+  client.println("Connection: close");
+  client.println();
+  client.println("<!DOCTYPE html><html><head>");
+  client.println("<meta charset=UTF-8><meta name=viewport content='width=device-width,initial-scale=1'>");
+  client.println("<title>Protection</title>");
+  client.println("<style>body{font-family:sans-serif;margin:16px;background:#0f1011;color:#f7f8f8}");
+  client.println("h2{color:#5e6ad2}h3{color:#d0d6e0}.sec{background:#191a1b;border-radius:6px;padding:12px;margin:8px 0}");
+  client.println("table{border-collapse:collapse;width:100%}th,td{border:1px solid #2e2e2e;padding:4px 6px}");
+  client.println("th{background:#191a1b;color:#d0d6e0}");
+  client.println("select,input[type=number]{padding:3px;background:#1a1a1f;color:#eee;border:1px solid #3e3e44;border-radius:3px}");
+  client.println("input[type=number]{width:70px}select{width:80px}");
+  client.println("input[type=submit]{background:#1976d2;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer;margin-top:10px}");
+  client.println("a{color:#d0d6e0}.note{color:#8a8f98;font-size:0.85em}");
+  client.println(".on{color:#66bb6a}.off{color:#ef5350}fieldset{border:1px solid #3e3e44;border-radius:6px;padding:12px;margin:12px 0}");
+  client.println("legend{color:#5e6ad2;font-weight:bold}</style></head><body>");
+  client.println("<h2>Protection</h2>");
+  client.printf("<p><a href='/'>Dashboard</a> | <a href='/greenhouse'>Greenhouse</a> | <a href='/irrigation'>Irrigation</a> | <a href='/ccm'>CCM</a> | <a href='/ota'>FW</a></p>\n");
+  client.println("<div class=sec id=pstat>Loading...</div>");
+
+  // Dew Prevention form
+  client.println("<form method=POST action=/api/protection>");
+  client.println("<fieldset><legend>Dew Prevention (結露対策)</legend>");
+  client.println("<p class=note>Runs circulation fan / heater before sunrise to prevent condensation.</p>");
+  client.println("<table>");
+  client.printf("<tr><th>Enable</th><td><input type=checkbox name=dew_en value=1%s></td></tr>\n", dewCtrl.enabled ? " checked" : "");
+  client.printf("<tr><th>Latitude</th><td><input type=number name=lat value=%.4f min=-90 max=90 step=0.01></td></tr>\n", dewCtrl.latitude);
+  client.printf("<tr><th>Longitude</th><td><input type=number name=lon value=%.4f min=-180 max=180 step=0.01></td></tr>\n", dewCtrl.longitude);
+  client.printf("<tr><th>Timezone (UTC+)</th><td><input type=number name=tz value=%d min=-12 max=14></td></tr>\n", dewCtrl.timezone_h);
+  client.printf("<tr><th>Before sunrise (min)</th><td><input type=number name=bmin value=%d min=0 max=180></td></tr>\n", dewCtrl.before_sunrise_min);
+  client.printf("<tr><th>After sunrise (min)</th><td><input type=number name=amin value=%d min=0 max=180></td></tr>\n", dewCtrl.after_sunrise_min);
+
+  // Fan relay select
+  client.printf("<tr><th>Fan relay</th><td><select name=dfan>");
+  client.printf("<option value=-1%s>-</option>", dewCtrl.fan_relay_ch < 0 ? " selected" : "");
+  for (int c = 0; c < 8; c++)
+    client.printf("<option value=%d%s>CH%d</option>", c, dewCtrl.fan_relay_ch == c ? " selected" : "", c + 1);
+  client.printf("</select></td></tr>\n");
+
+  // Heater relay select
+  client.printf("<tr><th>Heater relay</th><td><select name=dheat>");
+  client.printf("<option value=-1%s>-</option>", dewCtrl.heater_relay_ch < 0 ? " selected" : "");
+  for (int c = 0; c < 8; c++)
+    client.printf("<option value=%d%s>CH%d</option>", c, dewCtrl.heater_relay_ch == c ? " selected" : "", c + 1);
+  client.printf("</select></td></tr>\n");
+  client.println("</table></fieldset>");
+
+  // Temp Rate Guard form
+  client.println("<fieldset><legend>Temp Rate Guard (温度急変対策)</legend>");
+  client.println("<p class=note>Activates fan when temperature rises too fast (e.g. sudden sun exposure).</p>");
+  client.println("<table>");
+  client.printf("<tr><th>Enable</th><td><input type=checkbox name=rate_en value=1%s></td></tr>\n", rateGuard.enabled ? " checked" : "");
+  client.printf("<tr><th>Threshold (C/min)</th><td><input type=number name=rthr value=%.1f min=0.5 max=10 step=0.1></td></tr>\n", rateGuard.rate_threshold);
+
+  // Sensor select
+  client.printf("<tr><th>Sensor</th><td><select name=rsrc>");
+  client.printf("<option value=0%s>SHT40</option>", rateGuard.sensor_src == 0 ? " selected" : "");
+  client.printf("<option value=1%s>DS18B20</option>", rateGuard.sensor_src == 1 ? " selected" : "");
+  client.printf("</select></td></tr>\n");
+
+  // Fan relay
+  client.printf("<tr><th>Fan relay</th><td><select name=rfan>");
+  client.printf("<option value=-1%s>-</option>", rateGuard.fan_relay_ch < 0 ? " selected" : "");
+  for (int c = 0; c < 8; c++)
+    client.printf("<option value=%d%s>CH%d</option>", c, rateGuard.fan_relay_ch == c ? " selected" : "", c + 1);
+  client.printf("</select></td></tr>\n");
+
+  client.printf("<tr><th>Hold time (s)</th><td><input type=number name=rhld value=%d min=30 max=600></td></tr>\n", rateGuard.hold_sec);
+  client.println("</table></fieldset>");
+
+  client.println("<input type=submit value='Save All'>");
+  client.println("</form>");
+
+  // Auto-refresh status
+  client.println("<script>");
+  client.println("function pLoad(){");
+  client.println("fetch('/api/state').then(function(r){return r.json();}).then(function(d){");
+  client.println("var p=d.protection||{};var s='<h3>Status</h3>';");
+  client.println("if(p.dew){var dw=p.dew;");
+  client.println("  s+='<b>Dew:</b> '+(dw.enabled?'<span class=on>Enabled</span>':'<span class=off>Disabled</span>');");
+  client.println("  if(dw.sunrise)s+=' | <b>Sunrise:</b> '+dw.sunrise;");
+  client.println("  s+=' | <b>State:</b> '+(dw.active?'<span class=on>ACTIVE</span>':'<span class=off>Standby</span>');");
+  client.println("  s+='<br>';}");
+  client.println("if(p.rate){var rt=p.rate;");
+  client.println("  s+='<b>Rate Guard:</b> '+(rt.enabled?'<span class=on>Enabled</span>':'<span class=off>Disabled</span>');");
+  client.println("  if(rt.current_rate!==null)s+=' | <b>Rate:</b> '+rt.current_rate.toFixed(2)+' C/min';");
+  client.println("  s+=' | <b>State:</b> '+(rt.active?'<span class=on>ACTIVE</span>':'<span class=off>Normal</span>');}");
+  client.println("document.getElementById('pstat').innerHTML=s;");
+  client.println("});}");
+  client.println("pLoad();setInterval(pLoad,3000);");
+  client.println("</script>");
+  client.println("</body></html>");
+}
+
+// ============================================================
+// POST /api/protection
+// ============================================================
+void handleProtectionPost(WiFiClient& client, const String& body) {
+  auto getField = [&](const String& key) -> String {
+    String search = key + "=";
+    int idx = body.indexOf(search);
+    if (idx < 0) return "";
+    idx += search.length();
+    int end = body.indexOf('&', idx);
+    if (end < 0) end = body.length();
+    return body.substring(idx, end);
+  };
+
+  // Dew
+  dewCtrl.enabled = (getField("dew_en") == "1");
+  String lat = getField("lat");  if (lat.length() > 0) dewCtrl.latitude = lat.toFloat();
+  String lon = getField("lon");  if (lon.length() > 0) dewCtrl.longitude = lon.toFloat();
+  String tz  = getField("tz");   if (tz.length() > 0)  dewCtrl.timezone_h = tz.toInt();
+  String bm  = getField("bmin"); if (bm.length() > 0)  dewCtrl.before_sunrise_min = bm.toInt();
+  String am  = getField("amin"); if (am.length() > 0)  dewCtrl.after_sunrise_min = am.toInt();
+  String df  = getField("dfan"); if (df.length() > 0)  dewCtrl.fan_relay_ch = df.toInt();
+  String dh  = getField("dheat");if (dh.length() > 0)  dewCtrl.heater_relay_ch = dh.toInt();
+
+  // Rate Guard
+  rateGuard.enabled = (getField("rate_en") == "1");
+  String rt = getField("rthr"); if (rt.length() > 0) rateGuard.rate_threshold = rt.toFloat();
+  String rs = getField("rsrc"); if (rs.length() > 0) rateGuard.sensor_src = rs.toInt();
+  String rf = getField("rfan"); if (rf.length() > 0) rateGuard.fan_relay_ch = rf.toInt();
+  String rh = getField("rhld"); if (rh.length() > 0) rateGuard.hold_sec = rh.toInt();
+
+  // Reset runtimes
+  dewRun.last_calc_day = -1;  // force recalc
+  dewRun.active = false;
+  rateRun = {NAN, 0, 0.0, false, 0};
+
+  saveDewConfig();
+  saveRateGuardConfig();
+
+  client.println("HTTP/1.1 303 See Other");
+  client.println("Location: /protection");
+  client.println("Connection: close");
+  client.println();
+}
+
+// ============================================================
 // OTA Firmware Update Page (GET /ota)
 // ============================================================
 void sendOTAPage(WiFiClient& client) {
@@ -2230,6 +2682,10 @@ void handleWebClient() {
     sendIrrigationPage(client);
   } else if (method == "POST" && path == "/api/irrigation") {
     handleIrrigationPost(client, body);
+  } else if (method == "GET" && path == "/protection") {
+    sendProtectionPage(client);
+  } else if (method == "POST" && path == "/api/protection") {
+    handleProtectionPost(client, body);
   } else if (method == "POST" && path == "/api/config") {
     handleConfigPost(client, body);
   } else if (method == "POST" && path == "/api/ccm") {
@@ -2283,6 +2739,8 @@ void setup() {
   loadCcmMapping();
   loadGreenhouseConfig();
   loadIrrigationConfig();
+  loadDewConfig();
+  loadRateGuardConfig();
 
   Serial.printf("Node=%s\n", nodeId.c_str());
   Serial.printf("[BOOT] hostname: %s.local\n", mdnsHostname.c_str());
@@ -2427,6 +2885,12 @@ void loop() {
 
   // Solar irrigation control (accumulation + trigger)
   irrigationControl(now);
+
+  // Dew prevention (sunrise-based)
+  dewPreventionControl(now);
+
+  // Temperature rate guard
+  tempRateGuardControl(now);
 
   // NTP re-sync
   static unsigned long lastNtpSync = 0;
