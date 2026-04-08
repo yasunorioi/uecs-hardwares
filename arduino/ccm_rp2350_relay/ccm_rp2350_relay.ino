@@ -1050,6 +1050,7 @@ a{color:#d0d6e0}
 <tbody id=dtbl></tbody></table>
 </div>
 <div class=sec id=sens></div>
+<div class=sec id=gh></div>
 <script>
 function relay(ch,v){
   fetch('/api/relay/'+ch,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:v})}).then(load);
@@ -1098,6 +1099,25 @@ function load(){
     if(d.sensor&&d.sensor.ds18b20_temp!==null)sv+='<b>DS18B20:</b> '+d.sensor.ds18b20_temp.toFixed(1)+'C ';
     if(d.sensor&&d.sensor.temp===null&&d.sensor.hum===null&&d.sensor.ds18b20_temp===null)sv+='<span class=off>No sensors</span>';
     document.getElementById('sens').innerHTML=sv;
+    var gh=d.greenhouse||[];
+    var anyGh=false;
+    for(var i=0;i<gh.length;i++){if(gh[i].enabled)anyGh=true;}
+    if(anyGh){
+      var gv='<h3>Greenhouse Control</h3><table><tr><th>Rule</th><th>CH</th><th>Sensor</th><th>Temp</th><th>Range</th><th>Duty</th><th>State</th></tr>';
+      for(var i=0;i<gh.length;i++){
+        var g=gh[i];
+        if(!g.enabled)continue;
+        gv+='<tr><td>'+(i+1)+'</td><td>CH'+(g.ch+1)+'</td><td>'+g.sensor+'</td>';
+        gv+='<td>'+(g.temp!==null?g.temp.toFixed(1)+'C':'-')+'</td>';
+        gv+='<td>'+g.temp_open+'-'+g.temp_full+'C</td>';
+        gv+='<td>'+g.duty+'%</td>';
+        gv+='<td class='+(g.active?'on':'off')+'>'+(g.active?'ON':'OFF')+'</td></tr>';
+      }
+      gv+='</table><p><a href="/greenhouse">Settings</a></p>';
+      document.getElementById('gh').innerHTML=gv;
+    } else {
+      document.getElementById('gh').innerHTML='<h3>Greenhouse Control</h3><span class=off>No rules active</span> — <a href="/greenhouse">Configure</a>';
+    }
   });
 }
 load();setInterval(load,5000);
@@ -1177,7 +1197,23 @@ void sendAPIState(WiFiClient& client) {
   if (mdns_enabled) doc["mdns_hostname"] = mdnsHostname + ".local";
   else              doc["mdns_hostname"] = nullptr;
 
-  char buffer[1536];
+  // Greenhouse control status
+  JsonArray ghArr = doc["greenhouse"].to<JsonArray>();
+  for (int i = 0; i < GH_CTRL_SLOTS; i++) {
+    JsonObject g = ghArr.add<JsonObject>();
+    g["enabled"]  = ghCtrl[i].enabled;
+    g["ch"]       = ghCtrl[i].ch;
+    g["temp_open"] = ghCtrl[i].temp_open;
+    g["temp_full"] = ghCtrl[i].temp_full;
+    g["cycle_sec"] = ghCtrl[i].cycle_sec;
+    g["sensor"]   = ghCtrl[i].sensor_src == 0 ? "SHT40" : "DS18B20";
+    if (!isnan(ghRun[i].lastTemp)) g["temp"] = round(ghRun[i].lastTemp * 10) / 10.0;
+    else g["temp"] = nullptr;
+    g["duty"]     = round(ghRun[i].duty * 100);
+    g["active"]   = ghRun[i].active;
+  }
+
+  char buffer[2048];
   serializeJson(doc, buffer);
 
   client.println("HTTP/1.1 200 OK");
@@ -1545,32 +1581,8 @@ void sendGreenhousePage(WiFiClient& client) {
   client.println("<h2>Greenhouse Control</h2>");
   client.printf("<p><a href='/'>Dashboard</a> | <a href='/ccm'>CCM</a> | <a href='/config'>Network</a> | <a href='/ota'>Firmware</a></p>\n");
   client.println("<p class=note>Temperature-based proportional relay control. CCM commands take priority when active.</p>");
-
-  // Current status
-  client.println("<div class=sec><h3>Status</h3>");
-  client.printf("<b>SHT40:</b> %s ", sht40_detected ? "<span class=on>OK</span>" : "<span class=off>none</span>");
-  if (sht40_detected && !isnan(g_sht40_temp)) client.printf("(%.1fC) ", g_sht40_temp);
-  client.printf(" | <b>DS18B20:</b> %s ", ds18b20_detected ? "<span class=on>OK</span>" : "<span class=off>none</span>");
-  if (ds18b20_detected && !isnan(g_ds18b20_temp)) client.printf("(%.1fC) ", g_ds18b20_temp);
-  client.println("</div>");
-
-  // Runtime
-  client.println("<div class=sec><h3>Runtime</h3><table>");
-  client.println("<tr><th>Rule</th><th>CH</th><th>Temp</th><th>Duty</th><th>State</th></tr>");
-  for (int i = 0; i < GH_CTRL_SLOTS; i++) {
-    if (!ghCtrl[i].enabled || ghCtrl[i].ch < 0) {
-      client.printf("<tr><td>%d</td><td colspan=4 class=off>disabled</td></tr>", i + 1);
-    } else {
-      client.printf("<tr><td>%d</td><td>CH%d</td>", i + 1, ghCtrl[i].ch + 1);
-      if (!isnan(ghRun[i].lastTemp)) client.printf("<td>%.1fC</td>", ghRun[i].lastTemp);
-      else client.printf("<td class=off>-</td>");
-      client.printf("<td>%.0f%%</td><td class=%s>%s</td></tr>",
-                    ghRun[i].duty * 100,
-                    ghRun[i].active ? "on" : "off",
-                    ghRun[i].active ? "ON" : "OFF");
-    }
-  }
-  client.println("</table></div>");
+  client.println("<div class=sec id=ghstat>Loading...</div>");
+  client.println("<div class=sec id=ghrun>Loading...</div>");
 
   // Config form
   client.println("<form method=POST action=/api/greenhouse>");
@@ -1598,6 +1610,36 @@ void sendGreenhousePage(WiFiClient& client) {
   client.println("<input type=submit value='Save'>");
   client.println("</form>");
   client.println("<p class=note>Open: relay starts at this temp. Full: 100% duty at this temp. Cycle: ON+OFF period in seconds.</p>");
+  // Auto-refresh status
+  client.println("<script>");
+  client.println("function ghLoad(){");
+  client.println("fetch('/api/state').then(function(r){return r.json();}).then(function(d){");
+  // Sensor status
+  client.println("var s='<h3>Sensors</h3>';");
+  client.println("if(d.sht40_ok)s+='<b>SHT40:</b> <span class=on>'+(d.sensor.temp!==null?d.sensor.temp.toFixed(1)+'C':'OK')+'</span> ';");
+  client.println("else s+='<b>SHT40:</b> <span class=off>none</span> ';");
+  client.println("if(d.sensor.hum!==null)s+='<b>Hum:</b> '+d.sensor.hum.toFixed(1)+'% ';");
+  client.println("if(d.ds18b20_ok)s+='| <b>DS18B20:</b> <span class=on>'+(d.sensor.ds18b20_temp!==null?d.sensor.ds18b20_temp.toFixed(1)+'C':'OK')+'</span>';");
+  client.println("else s+='| <b>DS18B20:</b> <span class=off>none</span>';");
+  client.println("document.getElementById('ghstat').innerHTML=s;");
+  // Runtime table
+  client.println("var gh=d.greenhouse||[];var h='<h3>Runtime</h3>';");
+  client.println("var any=false;for(var i=0;i<gh.length;i++)if(gh[i].enabled)any=true;");
+  client.println("if(any){");
+  client.println("h+='<table><tr><th>Rule</th><th>CH</th><th>Sensor</th><th>Temp</th><th>Range</th><th>Duty</th><th>State</th></tr>';");
+  client.println("for(var i=0;i<gh.length;i++){var g=gh[i];if(!g.enabled)continue;");
+  client.println("h+='<tr><td>'+(i+1)+'</td><td>CH'+(g.ch+1)+'</td><td>'+g.sensor+'</td>';");
+  client.println("h+='<td style=\"font-size:1.3em;font-weight:bold\">'+(g.temp!==null?g.temp.toFixed(1)+'C':'-')+'</td>';");
+  client.println("h+='<td>'+g.temp_open+' - '+g.temp_full+'C</td>';");
+  // Duty bar visualization
+  client.println("h+='<td><div style=\"background:#2e2e2e;border-radius:3px;height:18px;width:80px;display:inline-block;vertical-align:middle\">';");
+  client.println("h+='<div style=\"background:'+(g.duty>70?'#e53935':g.duty>30?'#ffa726':'#43a047')+';height:100%;width:'+g.duty+'%;border-radius:3px\"></div></div> '+g.duty+'%</td>';");
+  client.println("h+='<td class='+(g.active?'on':'off')+'><b>'+(g.active?'ON':'OFF')+'</b></td></tr>';}");
+  client.println("h+='</table>';}else{h+='<span class=off>No rules active</span>';}");
+  client.println("document.getElementById('ghrun').innerHTML=h;");
+  client.println("});}");
+  client.println("ghLoad();setInterval(ghLoad,3000);");
+  client.println("</script>");
   client.println("</body></html>");
 }
 
