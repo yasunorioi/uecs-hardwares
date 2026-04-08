@@ -21,6 +21,7 @@
 #include <WiFiUdp.h>
 #include <SensirionI2cSht4x.h>
 #include <LEAmDNS.h>
+#include <Updater.h>
 
 #include "sw_watchdog.h"
 #include "sensor_registry.h"
@@ -177,6 +178,8 @@ void sendCcmConfigPage(WiFiClient& client);
 void handleRelayPost(WiFiClient& client, int ch, const String& body);
 void handleConfigPost(WiFiClient& client, const String& body);
 void handleCcmConfigPost(WiFiClient& client, const String& body);
+void sendOTAPage(WiFiClient& client);
+void handleOTAUpload(WiFiClient& client, int contentLength);
 void initRS485();
 void pollDrainSensor();
 uint16_t modbusCalcCRC(const uint8_t* data, size_t len);
@@ -868,7 +871,7 @@ function load(){
       '<b>Node:</b> '+d.node_id+' | <b>FW:</b> '+d.version+
       ' | <b>Protocol:</b> <span style="color:#ffa726">UECS-CCM</span>'+
       ' | <b>Uptime:</b> '+d.uptime+'s'+
-      ' | <a href="/config">Network</a> | <a href="/ccm">CCM Config</a>';
+      ' | <a href="/config">Network</a> | <a href="/ccm">CCM Config</a> | <a href="/ota">Firmware</a>';
     var mdnsHost=d.mdns_hostname?(' | <b>mDNS:</b> '+d.mdns_hostname):'';
     document.getElementById('net').innerHTML=
       '<h3>Network</h3><b>IP:</b> '+d.ip+
@@ -1088,7 +1091,7 @@ void sendConfigPage(WiFiClient& client) {
   client.println("input[type=submit]{background:#1976d2;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer;margin-top:10px}");
   client.println("a{color:#d0d6e0}.note{color:#8a8f98;font-size:0.85em}</style></head><body>");
   client.println("<h2>Network Configuration</h2>");
-  client.printf("<p><a href='/'>Dashboard</a> | <a href='/ccm'>CCM Config</a> | Node: <b>%s</b></p>\n", nodeId.c_str());
+  client.printf("<p><a href='/'>Dashboard</a> | <a href='/ccm'>CCM Config</a> | <a href='/ota'>Firmware</a> | Node: <b>%s</b></p>\n", nodeId.c_str());
   client.println("<form method=POST action=/api/config>");
   client.println("<div class=sec><h3>Identity</h3>");
   client.printf("<label>node_id<input type=text name=node_id value='%s'></label>\n", nodeId.c_str());
@@ -1131,8 +1134,15 @@ void sendCcmConfigPage(WiFiClient& client) {
   client.println("input[type=submit]{background:#1976d2;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer;margin-top:10px}");
   client.println("a{color:#d0d6e0}.note{color:#8a8f98;font-size:0.85em}</style></head><body>");
   client.println("<h2>CCM Channel Mapping</h2>");
-  client.printf("<p><a href='/'>Dashboard</a> | <a href='/config'>Network</a></p>\n");
+  client.printf("<p><a href='/'>Dashboard</a> | <a href='/config'>Network</a> | <a href='/ota'>Firmware</a></p>\n");
   client.println("<p class=note>Map each relay channel to a UECS-CCM actuator type. Blank = unmapped (inactive).</p>");
+  // Bulk Room/Region setter
+  client.println("<div class=sec><h3>Bulk Set</h3>");
+  client.println("<label>Room: <input type=number id=bulkRoom min=1 max=999 style='width:60px'></label>");
+  client.println(" <button type=button onclick=\"var v=document.getElementById('bulkRoom').value;if(v)for(var i=0;i<8;i++)document.getElementsByName('room'+i)[0].value=v;\">Apply to All</button>");
+  client.println(" &nbsp; <label>Region: <input type=number id=bulkRegion min=1 max=999 style='width:60px'></label>");
+  client.println(" <button type=button onclick=\"var v=document.getElementById('bulkRegion').value;if(v)for(var i=0;i<8;i++)document.getElementsByName('region'+i)[0].value=v;\">Apply to All</button>");
+  client.println("</div>");
   client.println("<form method=POST action=/api/ccm>");
   client.println("<table><tr><th>CH</th><th>CCM Type</th><th>Room</th><th>Region</th><th>Order</th><th>Priority</th></tr>");
 
@@ -1298,6 +1308,125 @@ void handleCcmConfigPost(WiFiClient& client, const String& body) {
 }
 
 // ============================================================
+// OTA Firmware Update Page (GET /ota)
+// ============================================================
+void sendOTAPage(WiFiClient& client) {
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: text/html");
+  client.println("Connection: close");
+  client.println();
+  client.println("<!DOCTYPE html><html><head>");
+  client.println("<meta charset=UTF-8><meta name=viewport content='width=device-width,initial-scale=1'>");
+  client.println("<title>Firmware Update</title>");
+  client.println("<style>body{font-family:sans-serif;margin:16px;background:#0f1011;color:#f7f8f8}");
+  client.println("h2{color:#5e6ad2}.sec{background:#191a1b;border-radius:6px;padding:16px;margin:8px 0}");
+  client.println("a{color:#d0d6e0}.note{color:#8a8f98;font-size:0.85em}");
+  client.println("#prog{width:100%;height:24px;background:#2e2e2e;border-radius:4px;margin:10px 0;display:none}");
+  client.println("#progBar{height:100%;background:#1976d2;border-radius:4px;width:0%;transition:width 0.3s}");
+  client.println("#msg{margin:10px 0;font-weight:bold}");
+  client.println("input[type=file]{margin:8px 0}");
+  client.println("button{background:#1976d2;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer}");
+  client.println("button:disabled{background:#555}</style></head><body>");
+  client.println("<h2>Firmware Update</h2>");
+  client.printf("<p><a href='/'>Dashboard</a> | <a href='/config'>Network</a> | <a href='/ccm'>CCM</a></p>\n");
+  client.printf("<div class=sec><p>Current: <b>%s</b> v%s</p>\n", FW_NAME, FW_VERSION);
+  client.println("<p class=note>Select a .bin firmware file compiled with arduino-cli.</p>");
+  client.println("<input type=file id=fw accept='.bin'><br>");
+  client.println("<button id=btn onclick=doOTA()>Upload &amp; Flash</button>");
+  client.println("<div id=prog><div id=progBar></div></div>");
+  client.println("<div id=msg></div></div>");
+  client.println("<script>");
+  client.println("function doOTA(){");
+  client.println("var f=document.getElementById('fw').files[0];");
+  client.println("if(!f){alert('Select a file');return;}");
+  client.println("var btn=document.getElementById('btn');btn.disabled=true;");
+  client.println("var msg=document.getElementById('msg');");
+  client.println("var prog=document.getElementById('prog');prog.style.display='block';");
+  client.println("var bar=document.getElementById('progBar');");
+  client.println("msg.textContent='Uploading '+f.name+' ('+f.size+' bytes)...';");
+  client.println("var xhr=new XMLHttpRequest();");
+  client.println("xhr.open('POST','/api/ota',true);");
+  client.println("xhr.setRequestHeader('Content-Type','application/octet-stream');");
+  client.println("xhr.upload.onprogress=function(e){if(e.lengthComputable)bar.style.width=Math.round(e.loaded/e.total*100)+'%';};");
+  client.println("xhr.onload=function(){");
+  client.println("if(xhr.status==200){msg.textContent='Success! Rebooting...';bar.style.width='100%';bar.style.background='#4caf50';");
+  client.println("setTimeout(function(){window.location='/';},8000);}");
+  client.println("else{msg.textContent='Error: '+xhr.responseText;btn.disabled=false;bar.style.background='#f44336';}};");
+  client.println("xhr.onerror=function(){msg.textContent='Upload failed (connection lost). Device may be rebooting...';");
+  client.println("setTimeout(function(){window.location='/';},8000);};");
+  client.println("xhr.send(f);}");
+  client.println("</script></body></html>");
+}
+
+// ============================================================
+// OTA Upload Handler (POST /api/ota)
+// Receives raw binary firmware via Content-Type: application/octet-stream
+// ============================================================
+void handleOTAUpload(WiFiClient& client, int contentLength) {
+  if (contentLength <= 0 || contentLength > 8 * 1024 * 1024) {
+    client.println("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\nInvalid size");
+    return;
+  }
+
+  Serial.printf("[OTA] Starting update, size=%d bytes\n", contentLength);
+
+  if (!Update.begin(contentLength, U_FLASH)) {
+    Serial.printf("[OTA] Update.begin failed: %d\n", Update.getError());
+    client.println("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\nUpdate.begin failed");
+    return;
+  }
+
+  uint8_t buf[4096];
+  size_t written = 0;
+  unsigned long lastActivity = millis();
+
+  while (written < (size_t)contentLength) {
+    watchdog_update();
+
+    int avail = client.available();
+    if (avail > 0) {
+      int toRead = min(avail, (int)sizeof(buf));
+      int rd = client.readBytes(buf, toRead);
+      if (rd > 0) {
+        size_t wr = Update.write(buf, rd);
+        if (wr != (size_t)rd) {
+          Serial.printf("[OTA] Write mismatch: rd=%d wr=%zu\n", rd, wr);
+          client.println("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\nWrite failed");
+          Update.end();
+          return;
+        }
+        written += rd;
+        lastActivity = millis();
+        if ((written % 65536) < (size_t)rd) {
+          Serial.printf("[OTA] %zu / %d bytes\n", written, contentLength);
+        }
+      }
+    } else if (millis() - lastActivity > 30000) {
+      Serial.println("[OTA] Timeout waiting for data");
+      client.println("HTTP/1.1 408 Request Timeout\r\nConnection: close\r\n\r\nTimeout");
+      Update.end();
+      return;
+    } else {
+      delay(1);
+    }
+  }
+
+  if (Update.end(true)) {
+    Serial.printf("[OTA] Success! MD5: %s\n", Update.md5String().c_str());
+    client.println("HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nOK");
+    client.flush();
+    delay(500);
+    client.stop();
+    delay(1000);
+    rebootWithReason("ota_update");
+  } else {
+    Serial.printf("[OTA] end() failed: %d\n", Update.getError());
+    client.print("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\nUpdate failed: err=");
+    client.println(Update.getError());
+  }
+}
+
+// ============================================================
 // Web Router
 // ============================================================
 void handleWebClient() {
@@ -1330,6 +1459,14 @@ void handleWebClient() {
     }
   }
 
+  // OTA: stream directly, do NOT buffer body into String
+  if (method == "POST" && path == "/api/ota") {
+    handleOTAUpload(client, contentLength);
+    delay(1);
+    client.stop();
+    return;
+  }
+
   String body;
   if (contentLength > 0) {
     unsigned long bt = millis();
@@ -1348,6 +1485,8 @@ void handleWebClient() {
     sendConfigPage(client);
   } else if (method == "GET" && path == "/ccm") {
     sendCcmConfigPage(client);
+  } else if (method == "GET" && path == "/ota") {
+    sendOTAPage(client);
   } else if (method == "POST" && path == "/api/config") {
     handleConfigPost(client, body);
   } else if (method == "POST" && path == "/api/ccm") {
