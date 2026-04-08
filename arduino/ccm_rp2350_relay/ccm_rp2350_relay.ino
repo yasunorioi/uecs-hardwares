@@ -697,7 +697,7 @@ void loadCcmMapping() {
     strncpy(ccmMap[i].ccmType, "Relay", sizeof(ccmMap[i].ccmType) - 1);
     ccmMap[i].room     = 2;
     ccmMap[i].region   = 61;
-    ccmMap[i].order    = 1;
+    ccmMap[i].order    = i + 1;  // CH1=1, CH2=2, ..., CH8=8
     ccmMap[i].priority = 1;
     ccmMap[i].watchdog_sec = 60;
     ccmMap[i].di_link      = -1;
