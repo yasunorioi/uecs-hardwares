@@ -1533,10 +1533,12 @@ function load(){
       ' | <b>GW:</b> '+d.gateway+mdnsHost+
       '<br><b>MAC:</b> '+d.mac+
       ' | <b>CCM:</b> 224.0.0.1:16520';
+    var solSrc=d.ads1110_ok?'<span class=on>ADS1110</span>':(d.sensor&&d.sensor.solar_wm2!==null?'<span class=on>CCM</span>':'<span class=off>none</span>');
+    var solVal=(d.sensor&&d.sensor.solar_wm2!==null)?' '+d.sensor.solar_wm2.toFixed(0)+'W/m&sup2;':'';
     document.getElementById('devstat').innerHTML=
       '<h3>Device Status</h3>'+
       '<b>I2C:</b> '+(d.sht40_ok?'<span class=on>SHT40</span>':'<span class=off>none</span>')+
-      ' | <b>ADC:</b> '+(d.ads1110_ok?'<span class=on>ADS1110</span>':'<span class=off>none</span>')+
+      ' | <b>Solar:</b> '+solSrc+solVal+
       ' | <b>1-Wire:</b> '+(d.ds18b20_ok?'<span class=on>DS18B20</span>':'<span class=off>none</span>')+
       ' | <b>RS485:</b> '+(d.sen0575_ok?'<span class=on>SEN0575</span>':'<span class=off>none</span>');
     var rt='';
