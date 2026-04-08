@@ -41,8 +41,9 @@ const char* DEFAULT_IP            = "";          // 空=DHCP
 const char* DEFAULT_SUBNET        = "255.255.255.0";
 const char* DEFAULT_GATEWAY       = "192.168.1.1";
 const char* DEFAULT_DNS           = "192.168.1.1";
-const bool  DEFAULT_MDNS_ENABLED  = true;
-const char* DEFAULT_NODE_ID       = "ccm_relay_01";
+const bool  DEFAULT_MDNS_ENABLED   = true;
+const char* DEFAULT_MDNS_HOSTNAME  = "uecs-ccm-01";
+const char* DEFAULT_NODE_ID        = "ccm_relay_01";
 
 // ========== W5500 SPI1 Pins ==========
 const int W5500_CS   = 33;
@@ -122,6 +123,7 @@ unsigned long ntpEpoch  = 0;
 unsigned long ntpMillis = 0;
 
 int loopCount = 0;
+unsigned long last_status = 0;  // [STATUS] 30秒タイマー
 
 // ========== Objects ==========
 Wiznet5500lwIP eth(W5500_CS, SPI1, W5500_INT);
@@ -133,6 +135,7 @@ WiFiServer        webServer(80);
 
 String nodeId;
 String nodeName;
+String mdnsHostname;
 int    rs485Baud = RS485_DEFAULT_BAUD;
 
 // ========== RS485 / SEN0575 ==========
@@ -729,10 +732,11 @@ void loadConfig() {
 
       if (!err) {
         Serial.println("Config loaded from /config.json");
-        nodeId     = (const char*)(doc["node_id"]      | DEFAULT_NODE_ID);
-        nodeName   = (const char*)(doc["node_name"]    | DEFAULT_NODE_NAME);
-        ipStr      = (const char*)(doc["ip"]           | DEFAULT_IP);
-        rs485Baud  = doc["rs485_baud"] | RS485_DEFAULT_BAUD;
+        nodeId       = (const char*)(doc["node_id"]        | DEFAULT_NODE_ID);
+        nodeName     = (const char*)(doc["node_name"]      | DEFAULT_NODE_NAME);
+        mdnsHostname = (const char*)(doc["mdns_hostname"]  | DEFAULT_MDNS_HOSTNAME);
+        ipStr        = (const char*)(doc["ip"]             | DEFAULT_IP);
+        rs485Baud    = doc["rs485_baud"] | RS485_DEFAULT_BAUD;
         mdns_enabled = doc["mdns_enabled"] | DEFAULT_MDNS_ENABLED;
 
         if (ipStr.length() > 0) {
@@ -751,8 +755,9 @@ void loadConfig() {
   }
 
   Serial.println("Using default configuration (DHCP)");
-  nodeId   = DEFAULT_NODE_ID;
-  nodeName = DEFAULT_NODE_NAME;
+  nodeId       = DEFAULT_NODE_ID;
+  nodeName     = DEFAULT_NODE_NAME;
+  mdnsHostname = DEFAULT_MDNS_HOSTNAME;
 }
 
 // ============================================================
@@ -777,16 +782,25 @@ void initEthernet() {
   unsigned long start = millis();
   while (!eth.connected()) {
     if (millis() - start > (unsigned long)ETH_CONNECT_TIMEOUT * 1000UL) {
-      Serial.println("ETH: timeout");
+      Serial.println("[ERR] DHCP timeout, retrying...");
       rebootWithReason("eth_timeout");
     }
     delay(500);
     Serial.print(".");
   }
   Serial.println();
-  Serial.printf("ETH IP: %s  GW: %s\n",
+  {
+    uint8_t mac[6];
+    eth.macAddress(mac);
+    char mac_str[20];
+    snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    Serial.printf("[BOOT] mac: %s\n", mac_str);
+  }
+  Serial.printf("[NET] ip: %s gw: %s mask: %s\n",
                 eth.localIP().toString().c_str(),
-                eth.gatewayIP().toString().c_str());
+                eth.gatewayIP().toString().c_str(),
+                eth.subnetMask().toString().c_str());
 }
 
 void rebootWithReason(const char* reason) {
@@ -808,17 +822,17 @@ static const char HTML_PAGE[] = R"RELAY_HTML(
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>CCM Relay Node</title>
 <style>
-body{font-family:sans-serif;margin:16px;background:#1a1a2e;color:#e0e0e0}
-h2{color:#4fc3f7;margin:0 0 10px}h3{color:#90caf9;margin:6px 0}
+body{font-family:sans-serif;margin:16px;background:#0f1011;color:#f7f8f8}
+h2{color:#5e6ad2;margin:0 0 10px}h3{color:#d0d6e0;margin:6px 0}
 table{border-collapse:collapse;width:100%;margin:6px 0}
-th,td{border:1px solid #37474f;padding:5px 8px}
-th{background:#162447;color:#90caf9}
+th,td{border:1px solid #2e2e2e;padding:5px 8px}
+th{background:#191a1b;color:#d0d6e0}
 .on{color:#66bb6a;font-weight:bold}.off{color:#ef5350}
 .bon{background:#43a047;color:#fff;border:none;padding:4px 8px;border-radius:3px;cursor:pointer}
 .bof{background:#e53935;color:#fff;border:none;padding:4px 8px;border-radius:3px;cursor:pointer}
-.sec{background:#162447;border-radius:6px;padding:12px;margin:8px 0}
-input[type=number]{width:55px;padding:3px;background:#263238;color:#eee;border:1px solid #546e7a;border-radius:3px}
-a{color:#90caf9}
+.sec{background:#191a1b;border-radius:6px;padding:12px;margin:8px 0}
+input[type=number]{width:55px;padding:3px;background:#1a1a1f;color:#eee;border:1px solid #3e3e44;border-radius:3px}
+a{color:#d0d6e0}
 .ccm{color:#ffa726;font-size:0.85em}
 </style>
 </head><body>
@@ -954,7 +968,7 @@ void sendAPIState(WiFiClient& client) {
     doc["mac"] = macStr;
   }
 
-  if (mdns_enabled) doc["mdns_hostname"] = nodeId + ".local";
+  if (mdns_enabled) doc["mdns_hostname"] = mdnsHostname + ".local";
   else              doc["mdns_hostname"] = nullptr;
 
   char buffer[1536];
@@ -973,9 +987,10 @@ void sendAPIState(WiFiClient& client) {
 // ============================================================
 void sendAPIConfig(WiFiClient& client) {
   JsonDocument doc;
-  doc["node_id"]      = nodeId;
-  doc["node_name"]    = nodeName;
-  doc["mdns_enabled"] = mdns_enabled;
+  doc["node_id"]        = nodeId;
+  doc["node_name"]      = nodeName;
+  doc["mdns_hostname"]  = mdnsHostname;
+  doc["mdns_enabled"]   = mdns_enabled;
 
   if (LittleFS.exists("/config.json")) {
     File f = LittleFS.open("/config.json", "r");
@@ -1059,12 +1074,12 @@ void sendConfigPage(WiFiClient& client) {
   client.println("<!DOCTYPE html><html><head>");
   client.println("<meta charset=UTF-8><meta name=viewport content='width=device-width,initial-scale=1'>");
   client.println("<title>Config - CCM Relay</title>");
-  client.println("<style>body{font-family:sans-serif;margin:16px;background:#1a1a2e;color:#e0e0e0}");
-  client.println("h2{color:#4fc3f7}.sec{background:#162447;border-radius:6px;padding:12px;margin:8px 0}");
+  client.println("<style>body{font-family:sans-serif;margin:16px;background:#0f1011;color:#f7f8f8}");
+  client.println("h2{color:#5e6ad2}.sec{background:#191a1b;border-radius:6px;padding:12px;margin:8px 0}");
   client.println("label{display:block;margin:6px 0 2px}");
-  client.println("input[type=text],input[type=number]{width:220px;padding:4px;background:#263238;color:#eee;border:1px solid #546e7a;border-radius:3px}");
+  client.println("input[type=text],input[type=number]{width:220px;padding:4px;background:#1a1a1f;color:#eee;border:1px solid #3e3e44;border-radius:3px}");
   client.println("input[type=submit]{background:#1976d2;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer;margin-top:10px}");
-  client.println("a{color:#90caf9}.note{color:#90a4ae;font-size:0.85em}</style></head><body>");
+  client.println("a{color:#d0d6e0}.note{color:#8a8f98;font-size:0.85em}</style></head><body>");
   client.println("<h2>Network Configuration</h2>");
   client.printf("<p><a href='/'>Dashboard</a> | <a href='/ccm'>CCM Config</a> | Node: <b>%s</b></p>\n", nodeId.c_str());
   client.println("<form method=POST action=/api/config>");
@@ -1080,6 +1095,8 @@ void sendConfigPage(WiFiClient& client) {
   client.printf("<label>DNS<input type=text name=dns value='%s'></label>\n", curDns.c_str());
   client.println("</div>");
   client.println("<div class=sec><h3>mDNS</h3>");
+  client.printf("<label>Hostname<input type=text name=mdns_hostname value='%s' maxlength=32 placeholder='uecs-ccm-01'></label>\n", mdnsHostname.c_str());
+  client.println("<p class=note>Access via <b>&lt;hostname&gt;.local</b></p>");
   client.printf("<label><input type=checkbox name=mdns_enabled value=1%s> Enable mDNS</label>\n",
                 mdns_enabled ? " checked" : "");
   client.println("</div>");
@@ -1098,14 +1115,14 @@ void sendCcmConfigPage(WiFiClient& client) {
   client.println("<!DOCTYPE html><html><head>");
   client.println("<meta charset=UTF-8><meta name=viewport content='width=device-width,initial-scale=1'>");
   client.println("<title>CCM Config</title>");
-  client.println("<style>body{font-family:sans-serif;margin:16px;background:#1a1a2e;color:#e0e0e0}");
-  client.println("h2{color:#4fc3f7}h3{color:#90caf9}.sec{background:#162447;border-radius:6px;padding:12px;margin:8px 0}");
-  client.println("table{border-collapse:collapse;width:100%}th,td{border:1px solid #37474f;padding:4px 6px}");
-  client.println("th{background:#162447;color:#90caf9}");
-  client.println("select,input[type=number]{padding:3px;background:#263238;color:#eee;border:1px solid #546e7a;border-radius:3px}");
+  client.println("<style>body{font-family:sans-serif;margin:16px;background:#0f1011;color:#f7f8f8}");
+  client.println("h2{color:#5e6ad2}h3{color:#d0d6e0}.sec{background:#191a1b;border-radius:6px;padding:12px;margin:8px 0}");
+  client.println("table{border-collapse:collapse;width:100%}th,td{border:1px solid #2e2e2e;padding:4px 6px}");
+  client.println("th{background:#191a1b;color:#d0d6e0}");
+  client.println("select,input[type=number]{padding:3px;background:#1a1a1f;color:#eee;border:1px solid #3e3e44;border-radius:3px}");
   client.println("input[type=number]{width:55px}select{width:140px}");
   client.println("input[type=submit]{background:#1976d2;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer;margin-top:10px}");
-  client.println("a{color:#90caf9}.note{color:#90a4ae;font-size:0.85em}</style></head><body>");
+  client.println("a{color:#d0d6e0}.note{color:#8a8f98;font-size:0.85em}</style></head><body>");
   client.println("<h2>CCM Channel Mapping</h2>");
   client.printf("<p><a href='/'>Dashboard</a> | <a href='/config'>Network</a></p>\n");
   client.println("<p class=note>Map each relay channel to a UECS-CCM actuator type. Blank = unmapped (inactive).</p>");
@@ -1161,25 +1178,28 @@ void handleConfigPost(WiFiClient& client, const String& body) {
     return decoded;
   };
 
-  String newNodeId   = getField("node_id");
-  String newNodeName = getField("node_name");
-  String newIp       = getField("ip");
-  String newSubnet   = getField("subnet");
-  String newGateway  = getField("gateway");
-  String newDns      = getField("dns");
-  String newMdnsStr  = getField("mdns_enabled");
+  String newNodeId       = getField("node_id");
+  String newNodeName     = getField("node_name");
+  String newMdnsHostname = getField("mdns_hostname");
+  String newIp           = getField("ip");
+  String newSubnet       = getField("subnet");
+  String newGateway      = getField("gateway");
+  String newDns          = getField("dns");
+  String newMdnsStr      = getField("mdns_enabled");
 
-  if (newNodeId.length() == 0)   newNodeId   = nodeId;
-  if (newNodeName.length() == 0) newNodeName = nodeName;
-  if (newSubnet.length() == 0)   newSubnet   = DEFAULT_SUBNET;
-  if (newGateway.length() == 0)  newGateway  = DEFAULT_GATEWAY;
-  if (newDns.length() == 0)      newDns      = DEFAULT_DNS;
+  if (newNodeId.length() == 0)       newNodeId       = nodeId;
+  if (newNodeName.length() == 0)     newNodeName     = nodeName;
+  if (newMdnsHostname.length() == 0) newMdnsHostname = mdnsHostname;
+  if (newSubnet.length() == 0)       newSubnet       = DEFAULT_SUBNET;
+  if (newGateway.length() == 0)      newGateway      = DEFAULT_GATEWAY;
+  if (newDns.length() == 0)          newDns          = DEFAULT_DNS;
   bool newMdns = (newMdnsStr == "1");
 
   JsonDocument doc;
-  doc["node_id"]      = newNodeId;
-  doc["node_name"]    = newNodeName;
-  doc["mdns_enabled"] = newMdns;
+  doc["node_id"]        = newNodeId;
+  doc["node_name"]      = newNodeName;
+  doc["mdns_hostname"]  = newMdnsHostname;
+  doc["mdns_enabled"]   = newMdns;
   if (newIp.length() > 0) {
     doc["ip"]      = newIp;
     doc["subnet"]  = newSubnet;
@@ -1374,6 +1394,7 @@ void setup() {
   loadCcmMapping();
 
   Serial.printf("Node=%s\n", nodeId.c_str());
+  Serial.printf("[BOOT] hostname: %s.local\n", mdnsHostname.c_str());
 
   initEthernet();
   syncNTP();
@@ -1388,9 +1409,9 @@ void setup() {
 
   // mDNS
   if (mdns_enabled) {
-    if (MDNS.begin(nodeId.c_str())) {
+    if (MDNS.begin(mdnsHostname.c_str())) {
       MDNS.addService("http", "tcp", 80);
-      Serial.printf("mDNS: %s.local\n", nodeId.c_str());
+      Serial.printf("mDNS: %s.local\n", mdnsHostname.c_str());
     }
   }
 
@@ -1414,6 +1435,14 @@ void loop() {
 
   watchdog_update();
   swWdtFeed();
+
+  // [STATUS] 30秒毎デバッグ出力
+  if (millis() - last_status >= 30000UL) {
+    Serial.printf("[STATUS] ip:%s up:%lus\n",
+                  eth.localIP().toString().c_str(),
+                  millis() / 1000);
+    last_status = millis();
+  }
 
   if (millis() >= REBOOT_INTERVAL) {
     rebootWithReason("periodic_reboot");

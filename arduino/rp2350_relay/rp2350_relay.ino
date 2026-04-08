@@ -118,6 +118,7 @@ unsigned long ntpMillis = 0;   // 同期時のmillis()
 
 int mqttFailCount = 0;
 int loopCount     = 0;
+unsigned long last_status = 0;  // [STATUS] 30秒タイマー
 
 // ========== Objects ==========
 Wiznet5500lwIP eth(W5500_CS, SPI1, W5500_INT);
@@ -577,16 +578,25 @@ void initEthernet() {
   unsigned long start = millis();
   while (!eth.connected()) {
     if (millis() - start > (unsigned long)ETH_CONNECT_TIMEOUT * 1000UL) {
-      Serial.println("ETH: timeout");
+      Serial.println("[ERR] DHCP timeout, retrying...");
       rebootWithReason("eth_dhcp_timeout");
     }
     delay(500);
     Serial.print(".");
   }
   Serial.println();
-  Serial.printf("ETH IP: %s  GW: %s\n",
+  {
+    uint8_t mac[6];
+    eth.macAddress(mac);
+    char mac_str[20];
+    snprintf(mac_str, sizeof(mac_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    Serial.printf("[BOOT] mac: %s\n", mac_str);
+  }
+  Serial.printf("[NET] ip: %s gw: %s mask: %s\n",
                 eth.localIP().toString().c_str(),
-                eth.gatewayIP().toString().c_str());
+                eth.gatewayIP().toString().c_str(),
+                eth.subnetMask().toString().c_str());
 }
 
 // ============================================================
@@ -1434,6 +1444,7 @@ void setup() {
   Serial.printf("Node=%s House=%s MQTT=%s:%d\n",
                 nodeId.c_str(), houseId.c_str(),
                 mqttBroker.c_str(), mqttPort);
+  Serial.printf("[BOOT] hostname: %s.local\n", nodeId.c_str());
 
   // --- Ethernet ---
   initEthernet();
@@ -1511,6 +1522,15 @@ void loop() {
   // Watchdog feed (両方)
   watchdog_update();          // Tier 1: HW WDT
   swWdtFeed();                // Tier 2: SW WDT
+
+  // [STATUS] 30秒毎デバッグ出力
+  if (millis() - last_status >= 30000UL) {
+    Serial.printf("[STATUS] ip:%s mqtt:%s up:%lus\n",
+                  eth.localIP().toString().c_str(),
+                  mqttClient.connected() ? "OK" : "DISC",
+                  millis() / 1000);
+    last_status = millis();
+  }
 
   // Tier 3: 定期リブート (10分)
   if (millis() >= REBOOT_INTERVAL) {
