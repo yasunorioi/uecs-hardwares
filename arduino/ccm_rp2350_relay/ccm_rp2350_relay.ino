@@ -3,8 +3,8 @@
 // Protocol: UECS-CCM (UDP multicast 224.0.0.1:16520)
 // Relay: GPIO17-24 直接制御
 // DI:    GPIO9-16, フォトカプラ絶縁, アクティブLOW, 割り込み検知
-// RTC:   PCF85063 (I2C0: SDA=GPIO6, SCL=GPIO7)
-// Comm:  W5500 SPI1 (CS=GPIO33, RST=GPIO25, SCK=GPIO34, MOSI=GPIO35, MISO=GPIO36)
+// RTC:   PCF85063 (I2C1: SDA=GPIO6, SCL=GPIO7) — GPIO6/7 is I2C1 on RP2350B pinmux
+// Comm:  W5500 SPI0 (CS=GPIO33, RST=GPIO25, SCK=GPIO34, MOSI=GPIO35, MISO=GPIO36)
 // Framework: arduino-pico (Earle Philhower)
 //
 // Libraries: arduino-pico 4.5.2+, ArduinoJson 7.x, NTPClient 3.2.1,
@@ -59,8 +59,8 @@ const int RS485_RX = 5;
 const int RS485_DEFAULT_BAUD = 9600;
 
 // ========== I2C0 Pins (RTC PCF85063) ==========
-const int I2C_SDA = 6;
-const int I2C_SCL = 7;
+const int I2C_SDA = 6;  // I2C1 SDA (not I2C0 — GPIO6 is I2C1 per RP2350 pinmux)
+const int I2C_SCL = 7;  // I2C1 SCL
 
 // ========== PCF85063 RTC ==========
 const uint8_t PCF85063_ADDR = 0x51;
@@ -126,7 +126,10 @@ int loopCount = 0;
 unsigned long last_status = 0;  // [STATUS] 30秒タイマー
 
 // ========== Objects ==========
-Wiznet5500lwIP eth(W5500_CS, SPI1, W5500_INT);
+// Note: eth must be constructed after SPI pin setup in initEthernet()
+// GPIO33-36 are SPI0 pins on RP2350B (not SPI1)
+Wiznet5500lwIP* ethPtr = nullptr;
+#define eth (*ethPtr)
 WiFiUDP        ccmUDP;      // CCM multicast send/receive
 WiFiUDP        ntpUDP;
 NTPClient      timeClient(ntpUDP, "pool.ntp.org", 0);
@@ -196,32 +199,32 @@ static uint8_t bcd2dec(uint8_t b) { return (b >> 4) * 10 + (b & 0x0F); }
 static uint8_t dec2bcd(uint8_t d) { return ((d / 10) << 4) | (d % 10); }
 
 bool rtcGetTime(struct tm* t) {
-  Wire.beginTransmission(PCF85063_ADDR);
-  Wire.write(0x04);
-  if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom((uint8_t)PCF85063_ADDR, (uint8_t)7) != 7) return false;
-  t->tm_sec  = bcd2dec(Wire.read() & 0x7F);
-  t->tm_min  = bcd2dec(Wire.read() & 0x7F);
-  t->tm_hour = bcd2dec(Wire.read() & 0x3F);
-  t->tm_mday = bcd2dec(Wire.read() & 0x3F);
-  Wire.read();
-  t->tm_mon  = bcd2dec(Wire.read() & 0x1F) - 1;
-  t->tm_year = bcd2dec(Wire.read()) + 100;
+  Wire1.beginTransmission(PCF85063_ADDR);
+  Wire1.write(0x04);
+  if (Wire1.endTransmission(false) != 0) return false;
+  if (Wire1.requestFrom((uint8_t)PCF85063_ADDR, (uint8_t)7) != 7) return false;
+  t->tm_sec  = bcd2dec(Wire1.read() & 0x7F);
+  t->tm_min  = bcd2dec(Wire1.read() & 0x7F);
+  t->tm_hour = bcd2dec(Wire1.read() & 0x3F);
+  t->tm_mday = bcd2dec(Wire1.read() & 0x3F);
+  Wire1.read();
+  t->tm_mon  = bcd2dec(Wire1.read() & 0x1F) - 1;
+  t->tm_year = bcd2dec(Wire1.read()) + 100;
   t->tm_isdst = 0;
   return true;
 }
 
 bool rtcSetTime(struct tm* t) {
-  Wire.beginTransmission(PCF85063_ADDR);
-  Wire.write(0x04);
-  Wire.write(dec2bcd(t->tm_sec));
-  Wire.write(dec2bcd(t->tm_min));
-  Wire.write(dec2bcd(t->tm_hour));
-  Wire.write(dec2bcd(t->tm_mday));
-  Wire.write(0);
-  Wire.write(dec2bcd(t->tm_mon + 1));
-  Wire.write(dec2bcd(t->tm_year - 100));
-  return Wire.endTransmission() == 0;
+  Wire1.beginTransmission(PCF85063_ADDR);
+  Wire1.write(0x04);
+  Wire1.write(dec2bcd(t->tm_sec));
+  Wire1.write(dec2bcd(t->tm_min));
+  Wire1.write(dec2bcd(t->tm_hour));
+  Wire1.write(dec2bcd(t->tm_mday));
+  Wire1.write(0);
+  Wire1.write(dec2bcd(t->tm_mon + 1));
+  Wire1.write(dec2bcd(t->tm_year - 100));
+  return Wire1.endTransmission() == 0;
 }
 
 unsigned long getCurrentEpoch() {
@@ -298,13 +301,13 @@ bool readDI() {
 // I2C Sensor
 // ============================================================
 void scanI2CSensors() {
-  Wire.setTimeout(10);
+  Wire1.setTimeout(10);
   Serial.println("I2C scan:");
   int found = 0;
   for (uint8_t addr = 1; addr < 127; addr++) {
     if (addr == PCF85063_ADDR) continue;
-    Wire.beginTransmission(addr);
-    uint8_t rc = Wire.endTransmission();
+    Wire1.beginTransmission(addr);
+    uint8_t rc = Wire1.endTransmission();
     if (rc == 0) {
       found++;
       Serial.printf("  0x%02X -> ", addr);
@@ -322,7 +325,7 @@ void scanI2CSensors() {
   }
   if (found == 0) Serial.println("  no devices (continuing)");
   if (sht40_detected) {
-    sht4x.begin(Wire, 0x44);
+    sht4x.begin(Wire1, 0x44);
     Serial.println("SHT40 initialized");
   }
 }
@@ -770,10 +773,14 @@ void initEthernet() {
   digitalWrite(W5500_RST, HIGH);
   delay(500);
 
-  SPI1.setSCK(W5500_SCK);
-  SPI1.setTX(W5500_MOSI);
-  SPI1.setRX(W5500_MISO);
-  SPI1.begin();
+  SPI.setSCK(W5500_SCK);
+  SPI.setTX(W5500_MOSI);
+  SPI.setRX(W5500_MISO);
+  SPI.begin();
+
+  // Construct eth object AFTER SPI pins are configured
+  // GPIO33-36 = SPI0 on RP2350B pinmux
+  ethPtr = new Wiznet5500lwIP(W5500_CS, SPI, W5500_INT);
 
   lwipPollingPeriod(5);
   eth.begin();
@@ -1361,7 +1368,7 @@ void handleWebClient() {
 // ============================================================
 void setup() {
   Serial.begin(115200);
-  delay(2000);
+  { unsigned long t = millis(); while (!Serial && millis() - t < 3000) delay(10); }  // USB-CDC ready (3s timeout)
   Serial.printf("=== %s v%s ===\n", FW_NAME, FW_VERSION);
   Serial.println("Board: RP2350-POE-ETH-8DI-8RO");
   Serial.println("Protocol: UECS-CCM (UDP 224.0.0.1:16520)");
@@ -1377,9 +1384,9 @@ void setup() {
     attachInterrupt(digitalPinToInterrupt(DI_PINS[i]), diISR, CHANGE);
   }
 
-  Wire.setSDA(I2C_SDA);
-  Wire.setSCL(I2C_SCL);
-  Wire.begin();
+  Wire1.setSDA(I2C_SDA);
+  Wire1.setSCL(I2C_SCL);
+  Wire1.begin();
   delay(200);
 
   if (!LittleFS.begin()) {
@@ -1494,6 +1501,39 @@ void loop() {
   if (now - lastNtpSync >= NTP_SYNC_INTERVAL) {
     lastNtpSync = now;
     syncNTP();
+  }
+
+  // Serial command handler — type "status" or "?" to get IP/mDNS/uptime
+  static String serialCmd = "";
+  while (Serial.available()) {
+    char c = Serial.read();
+    if (c == '\n' || c == '\r') {
+      serialCmd.trim();
+      if (serialCmd == "status" || serialCmd == "?" || serialCmd == "ip") {
+        Serial.printf("[INFO] hostname: %s.local\n", mdnsHostname.c_str());
+        Serial.printf("[INFO] ip: %s gw: %s mask: %s\n",
+                      eth.localIP().toString().c_str(),
+                      eth.gatewayIP().toString().c_str(),
+                      eth.subnetMask().toString().c_str());
+        byte mac[6]; eth.macAddress(mac);
+        Serial.printf("[INFO] mac: %02X:%02X:%02X:%02X:%02X:%02X\n",
+                      mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        Serial.printf("[INFO] uptime: %lus relay: 0x%02X\n",
+                      millis() / 1000, relayState);
+        Serial.printf("[INFO] mdns: %s eth: %s\n",
+                      mdns_enabled ? "OK" : "OFF",
+                      eth.connected() ? "OK" : "DISC");
+      } else if (serialCmd == "help") {
+        Serial.println("Commands: status/ip/? help reboot");
+      } else if (serialCmd == "reboot") {
+        rebootWithReason("serial_cmd");
+      } else if (serialCmd.length() > 0) {
+        Serial.printf("Unknown: '%s' (type 'help')\n", serialCmd.c_str());
+      }
+      serialCmd = "";
+    } else {
+      serialCmd += c;
+    }
   }
 
   delay(50);
