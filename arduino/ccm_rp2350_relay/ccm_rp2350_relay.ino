@@ -106,6 +106,29 @@ const int CCM_ACTUATOR_TYPES_COUNT = sizeof(CCM_ACTUATOR_TYPES) / sizeof(CCM_ACT
 
 CcmMapping ccmMap[8];
 
+// ========== Greenhouse Local Control ==========
+// 温度ベース比例制御。CCM受信優先 → 途絶時ローカルフォールバック
+struct GreenhouseCtrl {
+  bool   enabled;        // ローカル制御有効
+  int    ch;             // 制御対象リレーch (0-7, -1=none)
+  float  temp_open;      // 開始温度 (この温度でデューティ>0%)
+  float  temp_full;      // 全開温度 (この温度でデューティ100%)
+  int    cycle_sec;      // 制御周期 秒 (e.g. 60 = 30sON+30sOFF at 50%)
+  int    sensor_src;     // 0=SHT40, 1=DS18B20
+};
+
+const int GH_CTRL_SLOTS = 4;  // 最大4ルール
+GreenhouseCtrl ghCtrl[GH_CTRL_SLOTS];
+
+// ランタイム状態
+struct GhRuntime {
+  unsigned long cycleStart;  // 現在サイクルの開始時刻
+  float         lastTemp;    // 最後に使った温度
+  float         duty;        // 現在のデューティ比 (0.0-1.0)
+  bool          active;      // 現在リレーON中か
+};
+GhRuntime ghRun[GH_CTRL_SLOTS];
+
 // ========== Timing ==========
 const int           SENSOR_INTERVAL      = 10;
 const int           ETH_CONNECT_TIMEOUT  = 15;
@@ -207,6 +230,11 @@ bool modbusReadInput(uint8_t addr, uint16_t reg, uint16_t count,
                      uint16_t* out1, uint16_t* out2);
 void ccmSendStates();
 void ccmReceive();
+void loadGreenhouseConfig();
+void saveGreenhouseConfig();
+void greenhouseControl(unsigned long now);
+void sendGreenhousePage(WiFiClient& client);
+void handleGreenhousePost(WiFiClient& client, const String& body);
 
 // ============================================================
 // DI Interrupt
@@ -779,6 +807,112 @@ void saveCcmMapping() {
 }
 
 // ============================================================
+// Greenhouse Local Control — Config & Logic
+// ============================================================
+void loadGreenhouseConfig() {
+  for (int i = 0; i < GH_CTRL_SLOTS; i++) {
+    ghCtrl[i].enabled   = false;
+    ghCtrl[i].ch        = -1;
+    ghCtrl[i].temp_open = 25.0;
+    ghCtrl[i].temp_full = 30.0;
+    ghCtrl[i].cycle_sec = 60;
+    ghCtrl[i].sensor_src = 0;
+    ghRun[i] = {0, NAN, 0.0, false};
+  }
+  if (!LittleFS.exists("/gh_ctrl.json")) return;
+  File f = LittleFS.open("/gh_ctrl.json", "r");
+  if (!f) return;
+  JsonDocument doc;
+  if (deserializeJson(doc, f)) { f.close(); return; }
+  f.close();
+  JsonArray arr = doc["rules"].as<JsonArray>();
+  int idx = 0;
+  for (JsonObject r : arr) {
+    if (idx >= GH_CTRL_SLOTS) break;
+    ghCtrl[idx].enabled    = r["enabled"]    | false;
+    ghCtrl[idx].ch         = r["ch"]         | -1;
+    ghCtrl[idx].temp_open  = r["temp_open"]  | 25.0;
+    ghCtrl[idx].temp_full  = r["temp_full"]  | 30.0;
+    ghCtrl[idx].cycle_sec  = r["cycle_sec"]  | 60;
+    ghCtrl[idx].sensor_src = r["sensor_src"] | 0;
+    idx++;
+  }
+  Serial.printf("Greenhouse: %d rules loaded\n", idx);
+}
+
+void saveGreenhouseConfig() {
+  JsonDocument doc;
+  JsonArray arr = doc["rules"].to<JsonArray>();
+  for (int i = 0; i < GH_CTRL_SLOTS; i++) {
+    JsonObject r = arr.add<JsonObject>();
+    r["enabled"]    = ghCtrl[i].enabled;
+    r["ch"]         = ghCtrl[i].ch;
+    r["temp_open"]  = ghCtrl[i].temp_open;
+    r["temp_full"]  = ghCtrl[i].temp_full;
+    r["cycle_sec"]  = ghCtrl[i].cycle_sec;
+    r["sensor_src"] = ghCtrl[i].sensor_src;
+  }
+  File f = LittleFS.open("/gh_ctrl.json", "w");
+  if (!f) return;
+  serializeJson(doc, f);
+  f.close();
+  Serial.println("Greenhouse config saved");
+}
+
+void greenhouseControl(unsigned long now) {
+  for (int i = 0; i < GH_CTRL_SLOTS; i++) {
+    if (!ghCtrl[i].enabled || ghCtrl[i].ch < 0 || ghCtrl[i].ch > 7) continue;
+    int ch = ghCtrl[i].ch;
+
+    // CCM受信があるchはスキップ（CCM優先）
+    if (lastCcmRx[ch] > 0 &&
+        (now - lastCcmRx[ch]) < (unsigned long)ccmMap[ch].watchdog_sec * 1000UL) {
+      continue;
+    }
+
+    // 温度取得
+    float temp = NAN;
+    if (ghCtrl[i].sensor_src == 0 && !isnan(g_sht40_temp)) {
+      temp = g_sht40_temp;
+    } else if (ghCtrl[i].sensor_src == 1 && !isnan(g_ds18b20_temp)) {
+      temp = g_ds18b20_temp;
+    }
+    if (isnan(temp)) continue;  // センサー無し→制御しない
+
+    ghRun[i].lastTemp = temp;
+
+    // デューティ比計算 (比例制御)
+    float duty = 0.0;
+    if (temp >= ghCtrl[i].temp_full) {
+      duty = 1.0;
+    } else if (temp > ghCtrl[i].temp_open) {
+      duty = (temp - ghCtrl[i].temp_open) / (ghCtrl[i].temp_full - ghCtrl[i].temp_open);
+    }
+    ghRun[i].duty = duty;
+
+    // サイクル制御 (デューティ比でON/OFF切替)
+    unsigned long cycleDur = (unsigned long)ghCtrl[i].cycle_sec * 1000UL;
+    if (cycleDur == 0) cycleDur = 60000;
+    if (ghRun[i].cycleStart == 0) ghRun[i].cycleStart = now;
+    unsigned long elapsed = now - ghRun[i].cycleStart;
+    if (elapsed >= cycleDur) {
+      ghRun[i].cycleStart = now;
+      elapsed = 0;
+    }
+
+    unsigned long onDur = (unsigned long)(duty * cycleDur);
+    bool shouldBeOn = (duty > 0.01) && (elapsed < onDur);
+
+    if (shouldBeOn != ghRun[i].active) {
+      setRelay(ch + 1, shouldBeOn);
+      ghRun[i].active = shouldBeOn;
+      Serial.printf("[GH] rule%d CH%d %s (%.1fC duty=%.0f%%)\n",
+                    i + 1, ch + 1, shouldBeOn ? "ON" : "OFF", temp, duty * 100);
+    }
+  }
+}
+
+// ============================================================
 // Configuration (LittleFS /config.json)
 // ============================================================
 void loadConfig() {
@@ -926,7 +1060,7 @@ function load(){
       '<b>Node:</b> '+d.node_id+' | <b>FW:</b> '+d.version+
       ' | <b>Protocol:</b> <span style="color:#ffa726">UECS-CCM</span>'+
       ' | <b>Uptime:</b> '+d.uptime+'s'+
-      ' | <a href="/config">Network</a> | <a href="/ccm">CCM Config</a> | <a href="/ota">Firmware</a>';
+      ' | <a href="/config">Network</a> | <a href="/ccm">CCM</a> | <a href="/greenhouse">Greenhouse</a> | <a href="/ota">FW</a>';
     var mdnsHost=d.mdns_hostname?(' | <b>mDNS:</b> '+d.mdns_hostname):'';
     document.getElementById('net').innerHTML=
       '<h3>Network</h3><b>IP:</b> '+d.ip+
@@ -1389,6 +1523,130 @@ void handleCcmConfigPost(WiFiClient& client, const String& body) {
 }
 
 // ============================================================
+// Greenhouse Control Page (GET /greenhouse)
+// ============================================================
+void sendGreenhousePage(WiFiClient& client) {
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: text/html");
+  client.println("Connection: close");
+  client.println();
+  client.println("<!DOCTYPE html><html><head>");
+  client.println("<meta charset=UTF-8><meta name=viewport content='width=device-width,initial-scale=1'>");
+  client.println("<title>Greenhouse Control</title>");
+  client.println("<style>body{font-family:sans-serif;margin:16px;background:#0f1011;color:#f7f8f8}");
+  client.println("h2{color:#5e6ad2}h3{color:#d0d6e0}.sec{background:#191a1b;border-radius:6px;padding:12px;margin:8px 0}");
+  client.println("table{border-collapse:collapse;width:100%}th,td{border:1px solid #2e2e2e;padding:4px 6px}");
+  client.println("th{background:#191a1b;color:#d0d6e0}");
+  client.println("select,input[type=number]{padding:3px;background:#1a1a1f;color:#eee;border:1px solid #3e3e44;border-radius:3px}");
+  client.println("input[type=number]{width:60px}select{width:80px}");
+  client.println("input[type=submit]{background:#1976d2;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer;margin-top:10px}");
+  client.println("a{color:#d0d6e0}.note{color:#8a8f98;font-size:0.85em}");
+  client.println(".on{color:#66bb6a}.off{color:#ef5350}</style></head><body>");
+  client.println("<h2>Greenhouse Control</h2>");
+  client.printf("<p><a href='/'>Dashboard</a> | <a href='/ccm'>CCM</a> | <a href='/config'>Network</a> | <a href='/ota'>Firmware</a></p>\n");
+  client.println("<p class=note>Temperature-based proportional relay control. CCM commands take priority when active.</p>");
+
+  // Current status
+  client.println("<div class=sec><h3>Status</h3>");
+  client.printf("<b>SHT40:</b> %s ", sht40_detected ? "<span class=on>OK</span>" : "<span class=off>none</span>");
+  if (sht40_detected && !isnan(g_sht40_temp)) client.printf("(%.1fC) ", g_sht40_temp);
+  client.printf(" | <b>DS18B20:</b> %s ", ds18b20_detected ? "<span class=on>OK</span>" : "<span class=off>none</span>");
+  if (ds18b20_detected && !isnan(g_ds18b20_temp)) client.printf("(%.1fC) ", g_ds18b20_temp);
+  client.println("</div>");
+
+  // Runtime
+  client.println("<div class=sec><h3>Runtime</h3><table>");
+  client.println("<tr><th>Rule</th><th>CH</th><th>Temp</th><th>Duty</th><th>State</th></tr>");
+  for (int i = 0; i < GH_CTRL_SLOTS; i++) {
+    if (!ghCtrl[i].enabled || ghCtrl[i].ch < 0) {
+      client.printf("<tr><td>%d</td><td colspan=4 class=off>disabled</td></tr>", i + 1);
+    } else {
+      client.printf("<tr><td>%d</td><td>CH%d</td>", i + 1, ghCtrl[i].ch + 1);
+      if (!isnan(ghRun[i].lastTemp)) client.printf("<td>%.1fC</td>", ghRun[i].lastTemp);
+      else client.printf("<td class=off>-</td>");
+      client.printf("<td>%.0f%%</td><td class=%s>%s</td></tr>",
+                    ghRun[i].duty * 100,
+                    ghRun[i].active ? "on" : "off",
+                    ghRun[i].active ? "ON" : "OFF");
+    }
+  }
+  client.println("</table></div>");
+
+  // Config form
+  client.println("<form method=POST action=/api/greenhouse>");
+  client.println("<table><tr><th>Rule</th><th>Enable</th><th>CH</th><th>Sensor</th><th>Open(C)</th><th>Full(C)</th><th>Cycle(s)</th></tr>");
+  for (int i = 0; i < GH_CTRL_SLOTS; i++) {
+    client.printf("<tr><td>%d</td>", i + 1);
+    client.printf("<td><input type=checkbox name=en%d value=1%s></td>", i, ghCtrl[i].enabled ? " checked" : "");
+    // CH select
+    client.printf("<td><select name=ch%d>", i);
+    client.printf("<option value=-1%s>-</option>", ghCtrl[i].ch < 0 ? " selected" : "");
+    for (int c = 0; c < 8; c++) {
+      client.printf("<option value=%d%s>CH%d</option>", c, ghCtrl[i].ch == c ? " selected" : "", c + 1);
+    }
+    client.printf("</select></td>");
+    // Sensor select
+    client.printf("<td><select name=ss%d>", i);
+    client.printf("<option value=0%s>SHT40</option>", ghCtrl[i].sensor_src == 0 ? " selected" : "");
+    client.printf("<option value=1%s>DS18B20</option>", ghCtrl[i].sensor_src == 1 ? " selected" : "");
+    client.printf("</select></td>");
+    client.printf("<td><input type=number name=to%d value=%.1f min=-10 max=60 step=0.5></td>", i, ghCtrl[i].temp_open);
+    client.printf("<td><input type=number name=tf%d value=%.1f min=-10 max=60 step=0.5></td>", i, ghCtrl[i].temp_full);
+    client.printf("<td><input type=number name=cy%d value=%d min=10 max=600></td></tr>", i, ghCtrl[i].cycle_sec);
+  }
+  client.println("</table>");
+  client.println("<input type=submit value='Save'>");
+  client.println("</form>");
+  client.println("<p class=note>Open: relay starts at this temp. Full: 100% duty at this temp. Cycle: ON+OFF period in seconds.</p>");
+  client.println("</body></html>");
+}
+
+// ============================================================
+// POST /api/greenhouse
+// ============================================================
+void handleGreenhousePost(WiFiClient& client, const String& body) {
+  auto getField = [&](const String& key) -> String {
+    String search = key + "=";
+    int idx = body.indexOf(search);
+    if (idx < 0) return "";
+    idx += search.length();
+    int end = body.indexOf('&', idx);
+    if (end < 0) end = body.length();
+    return body.substring(idx, end);
+  };
+
+  for (int i = 0; i < GH_CTRL_SLOTS; i++) {
+    String en = getField(String("en") + i);
+    ghCtrl[i].enabled = (en == "1");
+
+    String ch = getField(String("ch") + i);
+    if (ch.length() > 0) ghCtrl[i].ch = ch.toInt();
+
+    String ss = getField(String("ss") + i);
+    if (ss.length() > 0) ghCtrl[i].sensor_src = ss.toInt();
+
+    String to = getField(String("to") + i);
+    if (to.length() > 0) ghCtrl[i].temp_open = to.toFloat();
+
+    String tf = getField(String("tf") + i);
+    if (tf.length() > 0) ghCtrl[i].temp_full = tf.toFloat();
+
+    String cy = getField(String("cy") + i);
+    if (cy.length() > 0) ghCtrl[i].cycle_sec = cy.toInt();
+
+    // Reset runtime on config change
+    ghRun[i].cycleStart = 0;
+  }
+
+  saveGreenhouseConfig();
+
+  client.println("HTTP/1.1 303 See Other");
+  client.println("Location: /greenhouse");
+  client.println("Connection: close");
+  client.println();
+}
+
+// ============================================================
 // OTA Firmware Update Page (GET /ota)
 // ============================================================
 void sendOTAPage(WiFiClient& client) {
@@ -1568,6 +1826,10 @@ void handleWebClient() {
     sendCcmConfigPage(client);
   } else if (method == "GET" && path == "/ota") {
     sendOTAPage(client);
+  } else if (method == "GET" && path == "/greenhouse") {
+    sendGreenhousePage(client);
+  } else if (method == "POST" && path == "/api/greenhouse") {
+    handleGreenhousePost(client, body);
   } else if (method == "POST" && path == "/api/config") {
     handleConfigPost(client, body);
   } else if (method == "POST" && path == "/api/ccm") {
@@ -1619,6 +1881,7 @@ void setup() {
 
   loadConfig();
   loadCcmMapping();
+  loadGreenhouseConfig();
 
   Serial.printf("Node=%s\n", nodeId.c_str());
   Serial.printf("[BOOT] hostname: %s.local\n", mdnsHostname.c_str());
@@ -1757,6 +2020,9 @@ void loop() {
     Serial.printf("[%d] relay=0x%02X epoch=%lu uptime=%lus\n",
                   loopCount, relayState, getCurrentEpoch(), millis() / 1000);
   }
+
+  // Greenhouse local control (every loop for duty cycle switching)
+  greenhouseControl(now);
 
   // NTP re-sync
   static unsigned long lastNtpSync = 0;
