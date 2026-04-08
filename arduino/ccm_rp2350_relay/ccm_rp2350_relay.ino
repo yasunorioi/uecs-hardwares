@@ -1517,7 +1517,7 @@ function load(){
       '<b>Node:</b> '+d.node_id+' | <b>FW:</b> '+d.version+
       ' | <b>Protocol:</b> <span style="color:#ffa726">UECS-CCM</span>'+
       ' | <b>Uptime:</b> '+d.uptime+'s'+
-      ' | <a href="/config">Network</a> | <a href="/ccm">CCM</a> | <a href="/greenhouse">Greenhouse</a> | <a href="/irrigation">Irrigation</a> | <a href="/protection">Protection</a> | <a href="/ota">FW</a>';
+      ' | <a href="/ccm">CCM</a> | <a href="/greenhouse">Greenhouse</a> | <a href="/irrigation">Irrigation</a> | <a href="/protection">Protection</a> | <a href="/config">Network</a> | <a href="/ota">FW</a>';
     var mdnsHost=d.mdns_hostname?(' | <b>mDNS:</b> '+d.mdns_hostname):'';
     document.getElementById('net').innerHTML=
       '<h3>Network</h3><b>IP:</b> '+d.ip+
@@ -1852,7 +1852,7 @@ void sendConfigPage(WiFiClient& client) {
   client.println("input[type=submit]{background:#1976d2;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer;margin-top:10px}");
   client.println("a{color:#d0d6e0}.note{color:#8a8f98;font-size:0.85em}</style></head><body>");
   client.println("<h2>Network Configuration</h2>");
-  client.printf("<p><a href='/'>Dashboard</a> | <a href='/ccm'>CCM Config</a> | <a href='/ota'>Firmware</a> | Node: <b>%s</b></p>\n", nodeId.c_str());
+  client.printf("<p><a href='/'>Dashboard</a> | <a href='/ccm'>CCM</a> | <a href='/greenhouse'>Greenhouse</a> | <a href='/irrigation'>Irrigation</a> | <a href='/protection'>Protection</a> | <a href='/config'>Network</a> | <a href='/ota'>FW</a></p>\n");
   client.println("<form method=POST action=/api/config>");
   client.println("<div class=sec><h3>Identity</h3>");
   client.printf("<label>node_id<input type=text name=node_id value='%s'></label>\n", nodeId.c_str());
@@ -1895,7 +1895,7 @@ void sendCcmConfigPage(WiFiClient& client) {
   client.println("input[type=submit]{background:#1976d2;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer;margin-top:10px}");
   client.println("a{color:#d0d6e0}.note{color:#8a8f98;font-size:0.85em}</style></head><body>");
   client.println("<h2>CCM Channel Mapping</h2>");
-  client.printf("<p><a href='/'>Dashboard</a> | <a href='/config'>Network</a> | <a href='/ota'>Firmware</a></p>\n");
+  client.printf("<p><a href='/'>Dashboard</a> | <a href='/ccm'>CCM</a> | <a href='/greenhouse'>Greenhouse</a> | <a href='/irrigation'>Irrigation</a> | <a href='/protection'>Protection</a> | <a href='/config'>Network</a> | <a href='/ota'>FW</a></p>\n");
   client.println("<p class=note>Map each relay channel to a UECS-CCM actuator type. Blank = unmapped (inactive).</p>");
   // Bulk Room/Region setter
   client.println("<div class=sec><h3>Bulk Set</h3>");
@@ -2108,7 +2108,7 @@ void sendGreenhousePage(WiFiClient& client) {
   client.println("a{color:#d0d6e0}.note{color:#8a8f98;font-size:0.85em}");
   client.println(".on{color:#66bb6a}.off{color:#ef5350}</style></head><body>");
   client.println("<h2>Greenhouse Control</h2>");
-  client.printf("<p><a href='/'>Dashboard</a> | <a href='/ccm'>CCM</a> | <a href='/config'>Network</a> | <a href='/ota'>Firmware</a></p>\n");
+  client.printf("<p><a href='/'>Dashboard</a> | <a href='/ccm'>CCM</a> | <a href='/greenhouse'>Greenhouse</a> | <a href='/irrigation'>Irrigation</a> | <a href='/protection'>Protection</a> | <a href='/config'>Network</a> | <a href='/ota'>FW</a></p>\n");
   client.println("<p class=note>Temperature-based proportional relay control. CCM commands take priority when active.</p>");
   client.println("<div class=sec id=ghstat>Loading...</div>");
   client.println("<div class=sec id=ghrun>Loading...</div>");
@@ -2240,7 +2240,7 @@ void sendIrrigationPage(WiFiClient& client) {
   client.println(".bar{background:#2e2e2e;border-radius:3px;height:18px;width:120px;display:inline-block;vertical-align:middle}");
   client.println(".fill{height:100%;border-radius:3px}</style></head><body>");
   client.println("<h2>Solar Irrigation</h2>");
-  client.printf("<p><a href='/'>Dashboard</a> | <a href='/greenhouse'>Greenhouse</a> | <a href='/ccm'>CCM</a> | <a href='/config'>Network</a> | <a href='/ota'>Firmware</a></p>\n");
+  client.printf("<p><a href='/'>Dashboard</a> | <a href='/ccm'>CCM</a> | <a href='/greenhouse'>Greenhouse</a> | <a href='/irrigation'>Irrigation</a> | <a href='/protection'>Protection</a> | <a href='/config'>Network</a> | <a href='/ota'>FW</a></p>\n");
   client.println("<p class=note>Accumulated solar radiation triggers irrigation. Requires ADS1110 + PVSS-03 on I2C Grove.</p>");
   client.println("<div class=sec id=solstat>Loading...</div>");
   client.println("<div class=sec id=irrirun>Loading...</div>");
@@ -2372,7 +2372,7 @@ void sendProtectionPage(WiFiClient& client) {
   client.println(".on{color:#66bb6a}.off{color:#ef5350}fieldset{border:1px solid #3e3e44;border-radius:6px;padding:12px;margin:12px 0}");
   client.println("legend{color:#5e6ad2;font-weight:bold}</style></head><body>");
   client.println("<h2>Protection</h2>");
-  client.printf("<p><a href='/'>Dashboard</a> | <a href='/greenhouse'>Greenhouse</a> | <a href='/irrigation'>Irrigation</a> | <a href='/ccm'>CCM</a> | <a href='/ota'>FW</a></p>\n");
+  client.printf("<p><a href='/'>Dashboard</a> | <a href='/ccm'>CCM</a> | <a href='/greenhouse'>Greenhouse</a> | <a href='/irrigation'>Irrigation</a> | <a href='/protection'>Protection</a> | <a href='/config'>Network</a> | <a href='/ota'>FW</a></p>\n");
   client.println("<div class=sec id=pstat>Loading...</div>");
 
   // Dew Prevention form
@@ -2515,7 +2515,7 @@ void sendOTAPage(WiFiClient& client) {
   client.println("button{background:#1976d2;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer}");
   client.println("button:disabled{background:#555}</style></head><body>");
   client.println("<h2>Firmware Update</h2>");
-  client.printf("<p><a href='/'>Dashboard</a> | <a href='/config'>Network</a> | <a href='/ccm'>CCM</a></p>\n");
+  client.printf("<p><a href='/'>Dashboard</a> | <a href='/ccm'>CCM</a> | <a href='/greenhouse'>Greenhouse</a> | <a href='/irrigation'>Irrigation</a> | <a href='/protection'>Protection</a> | <a href='/config'>Network</a> | <a href='/ota'>FW</a></p>\n");
   client.printf("<div class=sec><p>Current: <b>%s</b> v%s</p>\n", FW_NAME, FW_VERSION);
   client.println("<p class=note>Select a .bin firmware file compiled with arduino-cli.</p>");
   client.println("<input type=file id=fw accept='.bin'><br>");
