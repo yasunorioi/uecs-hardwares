@@ -1,28 +1,38 @@
-# uecs-hardwares
+# uecs-hardwares — ArSprout拡張ハードウェア集
 
-UniPi daemon + センサードライバ + リレー制御 — UECS HW通信基盤
+**ArSprout / UECS環境に追加できる** センサーノード・リレーノードの  
+ファームウェアとドライバをまとめたリポジトリ。
 
-## 概要
-
-`uecs-hardwares` は [uecs-llm](https://github.com/oi-yasu/uecs-llm) リポジトリから
-`git filter-repo` で **HW通信基盤のみを履歴付き切り出し** した独立リポジトリ。
-
-**担当範囲: 物理HWとのインターフェース層（Layer 1）**
-
-```
-[F9P / DS18B20 / WH65LP / UniPi I2C-Relay / GPIOスイッチ]
-          ↓ このリポジトリが担当
-    [uecs_hardwares daemon]
-          ↓ MQTT / REST API (localhost:8080)
-    [uecs-llm: LLM三層制御]
-```
-
-元リポとの通信は **MQTTブローカー (mosquitto, localhost:1883)** と **REST API** のみ。
-Python インポート依存はゼロ（daemon ↔ control 間の直接 import なし）。
+既存のArSproutネットワーク（UECS-CCM UDP multicast）にそのまま参加でき、  
+ArSprout側の設定変更は不要。PCやRaspberry Piなしで単体動作する。
 
 ---
 
-## モジュール構成
+## Arduino FWノード
+
+| ディレクトリ | ボード | 概要 |
+|-------------|--------|------|
+| `arduino/ccm_rp2350_relay/` | Waveshare RP2350-ETH-8DI-8RO | **8chリレー + 8ch DI + センサー** — CCMノード |
+| `arduino/rp2350_relay/` | 同上 | MQTT版（Home Assistant / uecs-llm向け） |
+
+### ccm_rp2350_relay の主な機能
+
+- **UECS-CCM** (UDP 224.0.0.1:16520) で ArSprout と直接通信
+- 8ch リレー制御 + 8ch フォトカプラ絶縁デジタル入力
+- **DI→リレー連動** — ネットワーク断でもローカルで安全動作（フロートスイッチ等）
+- **無通信ウォッチドッグ** — CCM受信途絶でリレー強制OFF（ch別、デフォルト60秒）
+- センサー: SHT40 (I2C), DS18B20 (1-Wire), SEN0575降水量 (RS485)
+- **WebUI**: ダッシュボード / CCMマッピング / ネットワーク設定 / OTA FW更新
+- **OTA**: ブラウザから FW アップロード → 自動リブート（10台超の運用に対応）
+- WS2812 RGB LED 状態表示（緑=正常 / 黄=リレー稼働 / 赤=Ethernet断）
+- mDNS, NTP, 3段Watchdog (HW/SW/定期リブート)
+- PlatformIO / Arduino CLI 両対応
+
+詳細 → [`arduino/ccm_rp2350_relay/README.md`](arduino/ccm_rp2350_relay/README.md)
+
+---
+
+## Python デーモン (Raspberry Pi / UniPi向け)
 
 ```
 src/uecs_hardwares/
@@ -38,67 +48,49 @@ src/uecs_hardwares/
 └── wh65lp_reader.py      # Misol WH65LP気象ステーション UARTドライバ
 ```
 
-**依存ライブラリ: `paho-mqtt` のみ（サードパーティ依存最小）**
+Raspberry Pi + UniPi Neuron等のI2Cリレーボードで動作。  
+MQTT/REST APIでuecs-llm（LLM三層制御）と連携。
 
----
-
-## セットアップ
+### セットアップ
 
 ```bash
-# 1. リポジトリ取得
 git clone <this-repo> uecs-hardwares
 cd uecs-hardwares
-
-# 2. 設定ファイル準備
-cp config/unipi_daemon.example.yaml config/unipi_daemon.yaml
-# → config/unipi_daemon.yaml を環境に合わせて編集
-
-# 3. 仮想環境作成とインストール
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e .
-
-# 4. MQTTブローカー起動 (Docker)
-docker compose -f docker/docker-compose.yaml up -d
-
-# 5. daemon起動
+cp config/unipi_daemon.example.yaml config/unipi_daemon.yaml
+# → 環境に合わせて編集
 python3 -m uecs_hardwares.main --config config/unipi_daemon.yaml
 ```
 
-### systemd 登録
-
-```bash
-# systemd/unipi-daemon.service の __REPO_DIR__ を実際のパスに置換
-sudo cp systemd/unipi-daemon.service /etc/systemd/system/
-sudo systemctl enable --now unipi-daemon
-```
-
-### cron 登録 (Layer 1 緊急制御)
-
-```bash
-# systemd/uecs-hardwares-cron の __REPO_DIR__/__USER__ を置換
-sudo cp systemd/uecs-hardwares-cron /etc/cron.d/uecs-hardwares
-```
-
----
-
-## テスト
+### テスト
 
 ```bash
 pip install -e ".[dev]"
 python3 -m pytest tests/daemon/ -v
-# → 209 passed
 ```
 
 ---
 
-## 元リポとの関係
+## 位置づけ
 
-| 項目 | uecs-hardwares (本リポ) | uecs-llm |
-|------|------------------------|---------|
-| 担当 | HW通信基盤 (Layer 1) | LLM三層制御 (Layer 1-3) + Web UI |
-| 依存 | paho-mqtt のみ | anthropic, fastapi, httpx, 他多数 |
-| 通信 | MQTT / REST API で疎結合 | ← 同上 |
-| 切り出し元 | `src/agriha/daemon/` → `src/uecs_hardwares/` | 残留 |
+```
+ArSprout (既存CCMネットワーク)
+    │
+    ├── [本リポ: Arduino FWノード] ← CCM multicastで直接参加
+    │     Waveshare RP2350 / ESP32 系ボード
+    │
+    └── [本リポ: Python daemon] ← MQTT経由でuecs-llmと連携
+          Raspberry Pi + UniPi
+                │
+          [uecs-llm: LLM三層制御 + Web UI]
+```
 
-`uecs-llm` 側の `daemon/` 削除は別コマンドで指示がある際に実施。
+Arduino FWノードはArSproutネットワークに**設定不要で参加**。  
+Python daemonは[uecs-llm](https://github.com/oi-yasu/uecs-llm)と組み合わせて使う。
+
+---
+
+## ライセンス
+
+MIT
