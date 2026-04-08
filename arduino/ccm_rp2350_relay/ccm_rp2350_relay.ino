@@ -849,6 +849,15 @@ void ccmReceive() {
       break;
     }
 
+    // CCM sensor reception: InRadiation → use as solar input for irrigation
+    if (strcmp(baseType, "InRadiation") == 0 && !ads1110_detected) {
+      float wm2 = atof(valBuf);
+      if (wm2 >= 0.0 && wm2 <= 2000.0) {
+        g_solar_wm2 = wm2;
+        Serial.printf("CCM RX: InRadiation=%.1f W/m2 (room=%d)\n", wm2, room);
+      }
+    }
+
     pos = valEnd + 7;  // skip past </DATA>
   }
 }
