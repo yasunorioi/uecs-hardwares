@@ -8,6 +8,7 @@ enum SensorType {
   SENSOR_SHT40,    // 0x44 - Temp/Hum
   SENSOR_BMP280,   // 0x76 or 0x77 - Pressure/Temp
   SENSOR_BH1750,   // 0x23 or 0x5C - Lux (future)
+  SENSOR_ADS1110,  // 0x48 - 16bit ADC (M5Stack ADC Unit V1.1)
 };
 
 // I2C address -> sensor mapping
@@ -24,6 +25,8 @@ static const SensorEntry SENSOR_REGISTRY[] = {
   {0x77, SENSOR_BMP280, "BMP280"},  // alternate address
   {0x23, SENSOR_BH1750, "BH1750"},
   {0x5C, SENSOR_BH1750, "BH1750"},  // alternate address
+  {0x48, SENSOR_ADS1110, "ADS1110"},  // M5Stack ADC Unit V1.1
+  {0x49, SENSOR_ADS1110, "ADS1110"},  // alternate address (ADDR=Vs)
 };
 static const int SENSOR_REGISTRY_SIZE = sizeof(SENSOR_REGISTRY) / sizeof(SENSOR_REGISTRY[0]);
 

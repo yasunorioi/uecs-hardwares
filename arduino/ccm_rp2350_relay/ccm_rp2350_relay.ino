@@ -129,6 +129,29 @@ struct GhRuntime {
 };
 GhRuntime ghRun[GH_CTRL_SLOTS];
 
+// ========== Solar Irrigation Control ==========
+// 積算日射量ベース灌水。PVSS-03 (0-1V=0-1000W/m²) → ADS1110 I2C ADC
+struct IrrigationCtrl {
+  bool   enabled;
+  int    relay_ch;        // 灌水リレーch (0-7, -1=none)
+  float  threshold_mj;    // 積算日射量閾値 (MJ/m²) — 到達で灌水開始
+  int    duration_sec;    // 灌水時間 (秒)
+  float  min_wm2;         // この日射量未満は積算しない (夜間ノイズ除外)
+};
+
+const int IRRI_SLOTS = 2;  // 最大2ルール (e.g. 点滴+ミスト)
+IrrigationCtrl irriCtrl[IRRI_SLOTS];
+
+// ランタイム状態
+struct IrriRuntime {
+  float         accum_mj;       // 現在の積算日射量 (MJ/m²)
+  bool          irrigating;     // 灌水中フラグ
+  unsigned long irri_start;     // 灌水開始時刻 (millis)
+  unsigned long last_sample;    // 最終サンプル時刻 (millis)
+  int           today_count;    // 本日の灌水回数
+};
+IrriRuntime irriRun[IRRI_SLOTS];
+
 // ========== Timing ==========
 const int           SENSOR_INTERVAL      = 10;
 const int           ETH_CONNECT_TIMEOUT  = 15;
@@ -157,6 +180,12 @@ float g_sht40_hum       = NAN;
 
 bool  ds18b20_detected  = false;
 float g_ds18b20_temp    = NAN;
+
+// ========== ADS1110 ADC (M5Stack ADC Unit V1.1 / PVSS Solar Sensor) ==========
+const uint8_t ADS1110_ADDR     = 0x48;  // default (ADDR=GND)
+const uint8_t ADS1110_CFG_CONT_16BIT = 0x0C;  // continuous, 8SPS, gain=1, 16bit
+bool  ads1110_detected  = false;
+float g_solar_wm2       = NAN;  // instantaneous solar radiation (W/m²)
 
 bool mdns_enabled = DEFAULT_MDNS_ENABLED;
 
@@ -235,6 +264,12 @@ void saveGreenhouseConfig();
 void greenhouseControl(unsigned long now);
 void sendGreenhousePage(WiFiClient& client);
 void handleGreenhousePost(WiFiClient& client, const String& body);
+void loadIrrigationConfig();
+void saveIrrigationConfig();
+void irrigationControl(unsigned long now);
+void sendIrrigationPage(WiFiClient& client);
+void handleIrrigationPost(WiFiClient& client, const String& body);
+float readADS1110();
 
 // ============================================================
 // DI Interrupt
@@ -367,6 +402,7 @@ void scanI2CSensors() {
         if (SENSOR_REGISTRY[i].addr == addr) {
           Serial.printf("%s\n", SENSOR_REGISTRY[i].name);
           if (SENSOR_REGISTRY[i].type == SENSOR_SHT40) sht40_detected = true;
+          if (SENSOR_REGISTRY[i].type == SENSOR_ADS1110) ads1110_detected = true;
           matched = true;
           break;
         }
@@ -378,6 +414,13 @@ void scanI2CSensors() {
   if (sht40_detected) {
     sht4x.begin(Wire1, 0x44);
     Serial.println("SHT40 initialized");
+  }
+  if (ads1110_detected) {
+    // Configure: continuous conversion, 8 SPS, PGA gain=1
+    Wire1.beginTransmission(ADS1110_ADDR);
+    Wire1.write(ADS1110_CFG_CONT_16BIT);
+    Wire1.endTransmission();
+    Serial.println("ADS1110 initialized (solar ADC)");
   }
 }
 
@@ -413,6 +456,34 @@ void readSensors() {
       g_ds18b20_temp = NAN;
     }
   }
+
+  // ADS1110 → Solar radiation (PVSS-03: 0-1V = 0-1000 W/m²)
+  if (ads1110_detected) {
+    float v = readADS1110();
+    if (!isnan(v)) {
+      // PVSS-03: 0-1V linear → 0-1000 W/m²
+      float wm2 = v * 1000.0;
+      if (wm2 < 0.0) wm2 = 0.0;
+      if (wm2 > 2000.0) wm2 = NAN;  // sanity check
+      g_solar_wm2 = wm2;
+    }
+  }
+}
+
+// ============================================================
+// ADS1110 (M5Stack ADC Unit V1.1) — 16bit signed, Vref=2.048V
+// ============================================================
+float readADS1110() {
+  if (Wire1.requestFrom(ADS1110_ADDR, (uint8_t)3) != 3) return NAN;
+  uint8_t hi  = Wire1.read();
+  uint8_t lo  = Wire1.read();
+  uint8_t cfg = Wire1.read();
+  (void)cfg;
+  int16_t raw = ((int16_t)hi << 8) | lo;
+  // Vref=2.048V, gain=1, 16bit signed (max=+32767)
+  float voltage = (float)raw / 32767.0 * 2.048;
+  if (voltage < -0.01) return NAN;
+  return voltage;
 }
 
 // ============================================================
@@ -580,6 +651,18 @@ void ccmSendStates() {
     char dsBuf[8];
     dtostrf(g_ds18b20_temp, 1, 1, dsBuf);
     xml += dsBuf;
+    xml += "</DATA>";
+  }
+
+  // Solar radiation as InRadiation (ADS1110 + PVSS-03)
+  if (ads1110_detected && !isnan(g_solar_wm2)) {
+    int room = (ccmMap[0].ccmType[0] != '\0') ? ccmMap[0].room : 2;
+    xml += "<DATA type=\"InRadiation.cMC\" room=\"";
+    xml += room;
+    xml += "\" region=\"11\" order=\"1\" priority=\"29\" lv=\"S\" cast=\"uni\">";
+    char solBuf[8];
+    dtostrf(g_solar_wm2, 1, 1, solBuf);
+    xml += solBuf;
     xml += "</DATA>";
   }
 
@@ -913,6 +996,103 @@ void greenhouseControl(unsigned long now) {
 }
 
 // ============================================================
+// Solar Irrigation Control — Config & Logic
+// ============================================================
+void loadIrrigationConfig() {
+  for (int i = 0; i < IRRI_SLOTS; i++) {
+    irriCtrl[i].enabled      = false;
+    irriCtrl[i].relay_ch     = -1;
+    irriCtrl[i].threshold_mj = 0.5;   // 0.5 MJ/m² default
+    irriCtrl[i].duration_sec = 120;    // 2分 default
+    irriCtrl[i].min_wm2      = 50.0;  // 50 W/m² 未満は積算しない
+    irriRun[i] = {0.0, false, 0, 0, 0};
+  }
+  if (!LittleFS.exists("/irri_ctrl.json")) return;
+  File f = LittleFS.open("/irri_ctrl.json", "r");
+  if (!f) return;
+  JsonDocument doc;
+  if (deserializeJson(doc, f)) { f.close(); return; }
+  f.close();
+  JsonArray arr = doc["rules"].as<JsonArray>();
+  int idx = 0;
+  for (JsonObject r : arr) {
+    if (idx >= IRRI_SLOTS) break;
+    irriCtrl[idx].enabled      = r["enabled"]      | false;
+    irriCtrl[idx].relay_ch     = r["relay_ch"]      | -1;
+    irriCtrl[idx].threshold_mj = r["threshold_mj"]  | 0.5;
+    irriCtrl[idx].duration_sec = r["duration_sec"]  | 120;
+    irriCtrl[idx].min_wm2      = r["min_wm2"]       | 50.0;
+    idx++;
+  }
+  Serial.printf("Irrigation: %d rules loaded\n", idx);
+}
+
+void saveIrrigationConfig() {
+  JsonDocument doc;
+  JsonArray arr = doc["rules"].to<JsonArray>();
+  for (int i = 0; i < IRRI_SLOTS; i++) {
+    JsonObject r = arr.add<JsonObject>();
+    r["enabled"]      = irriCtrl[i].enabled;
+    r["relay_ch"]     = irriCtrl[i].relay_ch;
+    r["threshold_mj"] = irriCtrl[i].threshold_mj;
+    r["duration_sec"] = irriCtrl[i].duration_sec;
+    r["min_wm2"]      = irriCtrl[i].min_wm2;
+  }
+  File f = LittleFS.open("/irri_ctrl.json", "w");
+  if (!f) return;
+  serializeJson(doc, f);
+  f.close();
+  Serial.println("Irrigation config saved");
+}
+
+void irrigationControl(unsigned long now) {
+  if (!ads1110_detected || isnan(g_solar_wm2)) return;
+
+  for (int i = 0; i < IRRI_SLOTS; i++) {
+    if (!irriCtrl[i].enabled || irriCtrl[i].relay_ch < 0) continue;
+    int ch = irriCtrl[i].relay_ch;
+
+    // 灌水中 → 時間経過で停止
+    if (irriRun[i].irrigating) {
+      if ((now - irriRun[i].irri_start) >= (unsigned long)irriCtrl[i].duration_sec * 1000UL) {
+        setRelay(ch + 1, false);
+        irriRun[i].irrigating = false;
+        Serial.printf("[IRRI] rule%d CH%d OFF (done, accum=%.3f MJ, count=%d)\n",
+                      i + 1, ch + 1, irriRun[i].accum_mj, irriRun[i].today_count);
+        irriRun[i].accum_mj = 0.0;  // リセット、再積算開始
+      }
+      continue;  // 灌水中は積算しない
+    }
+
+    // 積算 (SENSOR_INTERVAL秒ごとにreadSensorsが呼ばれる前提)
+    if (irriRun[i].last_sample == 0) {
+      irriRun[i].last_sample = now;
+      continue;
+    }
+    unsigned long dt_ms = now - irriRun[i].last_sample;
+    if (dt_ms < 5000) continue;  // 最低5秒間隔
+    irriRun[i].last_sample = now;
+
+    if (g_solar_wm2 >= irriCtrl[i].min_wm2) {
+      // W/m² × 秒 → J/m² → MJ/m²
+      float dt_sec = dt_ms / 1000.0;
+      irriRun[i].accum_mj += (g_solar_wm2 * dt_sec) / 1000000.0;
+    }
+
+    // 閾値到達 → 灌水開始
+    if (irriRun[i].accum_mj >= irriCtrl[i].threshold_mj) {
+      setRelay(ch + 1, true);
+      irriRun[i].irrigating = true;
+      irriRun[i].irri_start = now;
+      irriRun[i].today_count++;
+      Serial.printf("[IRRI] rule%d CH%d ON (accum=%.3f MJ >= %.3f, #%d)\n",
+                    i + 1, ch + 1, irriRun[i].accum_mj,
+                    irriCtrl[i].threshold_mj, irriRun[i].today_count);
+    }
+  }
+}
+
+// ============================================================
 // Configuration (LittleFS /config.json)
 // ============================================================
 void loadConfig() {
@@ -1051,6 +1231,7 @@ a{color:#d0d6e0}
 </div>
 <div class=sec id=sens></div>
 <div class=sec id=gh></div>
+<div class=sec id=irri></div>
 <script>
 function relay(ch,v){
   fetch('/api/relay/'+ch,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:v})}).then(load);
@@ -1061,7 +1242,7 @@ function load(){
       '<b>Node:</b> '+d.node_id+' | <b>FW:</b> '+d.version+
       ' | <b>Protocol:</b> <span style="color:#ffa726">UECS-CCM</span>'+
       ' | <b>Uptime:</b> '+d.uptime+'s'+
-      ' | <a href="/config">Network</a> | <a href="/ccm">CCM</a> | <a href="/greenhouse">Greenhouse</a> | <a href="/ota">FW</a>';
+      ' | <a href="/config">Network</a> | <a href="/ccm">CCM</a> | <a href="/greenhouse">Greenhouse</a> | <a href="/irrigation">Irrigation</a> | <a href="/ota">FW</a>';
     var mdnsHost=d.mdns_hostname?(' | <b>mDNS:</b> '+d.mdns_hostname):'';
     document.getElementById('net').innerHTML=
       '<h3>Network</h3><b>IP:</b> '+d.ip+
@@ -1071,6 +1252,7 @@ function load(){
     document.getElementById('devstat').innerHTML=
       '<h3>Device Status</h3>'+
       '<b>I2C:</b> '+(d.sht40_ok?'<span class=on>SHT40</span>':'<span class=off>none</span>')+
+      ' | <b>ADC:</b> '+(d.ads1110_ok?'<span class=on>ADS1110</span>':'<span class=off>none</span>')+
       ' | <b>1-Wire:</b> '+(d.ds18b20_ok?'<span class=on>DS18B20</span>':'<span class=off>none</span>')+
       ' | <b>RS485:</b> '+(d.sen0575_ok?'<span class=on>SEN0575</span>':'<span class=off>none</span>');
     var rt='';
@@ -1097,7 +1279,8 @@ function load(){
     if(d.sensor&&d.sensor.temp!==null)sv+='<b>SHT40 Temp:</b> '+d.sensor.temp.toFixed(1)+'C ';
     if(d.sensor&&d.sensor.hum!==null)sv+='<b>Hum:</b> '+d.sensor.hum.toFixed(1)+'% ';
     if(d.sensor&&d.sensor.ds18b20_temp!==null)sv+='<b>DS18B20:</b> '+d.sensor.ds18b20_temp.toFixed(1)+'C ';
-    if(d.sensor&&d.sensor.temp===null&&d.sensor.hum===null&&d.sensor.ds18b20_temp===null)sv+='<span class=off>No sensors</span>';
+    if(d.sensor&&d.sensor.solar_wm2!==null)sv+='<b>Solar:</b> '+d.sensor.solar_wm2.toFixed(1)+' W/m&sup2; ';
+    if(d.sensor&&d.sensor.temp===null&&d.sensor.hum===null&&d.sensor.ds18b20_temp===null&&d.sensor.solar_wm2===null)sv+='<span class=off>No sensors</span>';
     document.getElementById('sens').innerHTML=sv;
     var gh=d.greenhouse||[];
     var anyGh=false;
@@ -1117,6 +1300,23 @@ function load(){
       document.getElementById('gh').innerHTML=gv;
     } else {
       document.getElementById('gh').innerHTML='<h3>Greenhouse Control</h3><span class=off>No rules active</span> — <a href="/greenhouse">Configure</a>';
+    }
+    var ir=d.irrigation||[];
+    var anyIr=false;
+    for(var i=0;i<ir.length;i++){if(ir[i].enabled)anyIr=true;}
+    if(anyIr){
+      var iv='<h3>Solar Irrigation</h3>';
+      if(d.sensor&&d.sensor.solar_wm2!==null)iv+='<b>Solar:</b> '+d.sensor.solar_wm2.toFixed(1)+' W/m&sup2; | ';
+      iv+='<table><tr><th>Rule</th><th>CH</th><th>Accum</th><th>Threshold</th><th>State</th><th>Today</th></tr>';
+      for(var i=0;i<ir.length;i++){var r=ir[i];if(!r.enabled)continue;
+        iv+='<tr><td>'+(i+1)+'</td><td>CH'+(r.relay_ch+1)+'</td>';
+        iv+='<td>'+r.accum_mj.toFixed(3)+' MJ</td><td>'+r.threshold_mj+' MJ</td>';
+        iv+='<td class='+(r.irrigating?'on':'off')+'>'+(r.irrigating?'WATERING':'Accum.')+'</td>';
+        iv+='<td><b>'+r.today_count+'</b></td></tr>';}
+      iv+='</table><p><a href="/irrigation">Settings</a></p>';
+      document.getElementById('irri').innerHTML=iv;
+    } else {
+      document.getElementById('irri').innerHTML='<h3>Solar Irrigation</h3><span class=off>Not configured</span> — <a href="/irrigation">Configure</a>';
     }
   });
 }
@@ -1174,6 +1374,8 @@ void sendAPIState(WiFiClient& client) {
   else                       sensor["hum"]  = nullptr;
   if (!isnan(g_ds18b20_temp)) sensor["ds18b20_temp"] = round(g_ds18b20_temp * 10) / 10.0;
   else                         sensor["ds18b20_temp"] = nullptr;
+  if (!isnan(g_solar_wm2)) sensor["solar_wm2"] = round(g_solar_wm2 * 10) / 10.0;
+  else                      sensor["solar_wm2"] = nullptr;
 
   // Network
   doc["ip"]      = eth.localIP().toString();
@@ -1183,6 +1385,7 @@ void sendAPIState(WiFiClient& client) {
   doc["sht40_ok"]    = sht40_detected;
   doc["ds18b20_ok"]  = ds18b20_detected;
   doc["sen0575_ok"]  = sen0575_detected;
+  doc["ads1110_ok"]  = ads1110_detected;
 
   // MAC
   {
@@ -1213,7 +1416,25 @@ void sendAPIState(WiFiClient& client) {
     g["active"]   = ghRun[i].active;
   }
 
-  char buffer[2048];
+  // Irrigation control status
+  JsonArray irriArr = doc["irrigation"].to<JsonArray>();
+  for (int i = 0; i < IRRI_SLOTS; i++) {
+    JsonObject ir = irriArr.add<JsonObject>();
+    ir["enabled"]      = irriCtrl[i].enabled;
+    ir["relay_ch"]     = irriCtrl[i].relay_ch;
+    ir["threshold_mj"] = irriCtrl[i].threshold_mj;
+    ir["duration_sec"] = irriCtrl[i].duration_sec;
+    ir["min_wm2"]      = irriCtrl[i].min_wm2;
+    ir["accum_mj"]     = round(irriRun[i].accum_mj * 1000) / 1000.0;
+    ir["irrigating"]   = irriRun[i].irrigating;
+    ir["today_count"]  = irriRun[i].today_count;
+    if (irriRun[i].irrigating) {
+      ir["remaining_sec"] = irriCtrl[i].duration_sec -
+        (int)((millis() - irriRun[i].irri_start) / 1000);
+    }
+  }
+
+  char buffer[3072];
   serializeJson(doc, buffer);
 
   client.println("HTTP/1.1 200 OK");
@@ -1689,6 +1910,139 @@ void handleGreenhousePost(WiFiClient& client, const String& body) {
 }
 
 // ============================================================
+// Solar Irrigation Page (GET /irrigation)
+// ============================================================
+void sendIrrigationPage(WiFiClient& client) {
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: text/html");
+  client.println("Connection: close");
+  client.println();
+  client.println("<!DOCTYPE html><html><head>");
+  client.println("<meta charset=UTF-8><meta name=viewport content='width=device-width,initial-scale=1'>");
+  client.println("<title>Solar Irrigation</title>");
+  client.println("<style>body{font-family:sans-serif;margin:16px;background:#0f1011;color:#f7f8f8}");
+  client.println("h2{color:#5e6ad2}h3{color:#d0d6e0}.sec{background:#191a1b;border-radius:6px;padding:12px;margin:8px 0}");
+  client.println("table{border-collapse:collapse;width:100%}th,td{border:1px solid #2e2e2e;padding:4px 6px}");
+  client.println("th{background:#191a1b;color:#d0d6e0}");
+  client.println("select,input[type=number]{padding:3px;background:#1a1a1f;color:#eee;border:1px solid #3e3e44;border-radius:3px}");
+  client.println("input[type=number]{width:70px}select{width:80px}");
+  client.println("input[type=submit]{background:#1976d2;color:#fff;border:none;padding:8px 20px;border-radius:4px;cursor:pointer;margin-top:10px}");
+  client.println("a{color:#d0d6e0}.note{color:#8a8f98;font-size:0.85em}");
+  client.println(".on{color:#66bb6a}.off{color:#ef5350}");
+  client.println(".bar{background:#2e2e2e;border-radius:3px;height:18px;width:120px;display:inline-block;vertical-align:middle}");
+  client.println(".fill{height:100%;border-radius:3px}</style></head><body>");
+  client.println("<h2>Solar Irrigation</h2>");
+  client.printf("<p><a href='/'>Dashboard</a> | <a href='/greenhouse'>Greenhouse</a> | <a href='/ccm'>CCM</a> | <a href='/config'>Network</a> | <a href='/ota'>Firmware</a></p>\n");
+  client.println("<p class=note>Accumulated solar radiation triggers irrigation. Requires ADS1110 + PVSS-03 on I2C Grove.</p>");
+  client.println("<div class=sec id=solstat>Loading...</div>");
+  client.println("<div class=sec id=irrirun>Loading...</div>");
+
+  // Config form
+  client.println("<h3>Settings</h3>");
+  client.println("<form method=POST action=/api/irrigation>");
+  client.println("<table><tr><th>Rule</th><th>Enable</th><th>Relay CH</th><th>Threshold(MJ/m&sup2;)</th><th>Duration(s)</th><th>Min W/m&sup2;</th></tr>");
+  for (int i = 0; i < IRRI_SLOTS; i++) {
+    client.printf("<tr><td>%d</td>", i + 1);
+    client.printf("<td><input type=checkbox name=en%d value=1%s></td>", i, irriCtrl[i].enabled ? " checked" : "");
+    client.printf("<td><select name=rc%d>", i);
+    client.printf("<option value=-1%s>-</option>", irriCtrl[i].relay_ch < 0 ? " selected" : "");
+    for (int c = 0; c < 8; c++) {
+      client.printf("<option value=%d%s>CH%d</option>", c, irriCtrl[i].relay_ch == c ? " selected" : "", c + 1);
+    }
+    client.printf("</select></td>");
+    client.printf("<td><input type=number name=th%d value=%.3f min=0.01 max=10 step=0.01></td>", i, irriCtrl[i].threshold_mj);
+    client.printf("<td><input type=number name=du%d value=%d min=10 max=3600></td>", i, irriCtrl[i].duration_sec);
+    client.printf("<td><input type=number name=mw%d value=%.0f min=0 max=500 step=10></td></tr>", i, irriCtrl[i].min_wm2);
+  }
+  client.println("</table>");
+  client.println("<input type=submit value='Save'>");
+  client.println("</form>");
+  client.println("<p class=note>Threshold: accumulated solar energy to trigger irrigation (typical: 0.3-1.0 MJ/m&sup2;).<br>");
+  client.println("Duration: how long irrigation runs per trigger.<br>");
+  client.println("Min W/m&sup2;: ignore solar readings below this (nighttime noise filter, default 50).</p>");
+
+  // Auto-refresh JS
+  client.println("<script>");
+  client.println("function irLoad(){");
+  client.println("fetch('/api/state').then(function(r){return r.json();}).then(function(d){");
+  // Solar sensor status
+  client.println("var s='<h3>Solar Sensor</h3>';");
+  client.println("if(d.ads1110_ok){");
+  client.println("  var wm2=d.sensor.solar_wm2;");
+  client.println("  s+='<b>ADS1110:</b> <span class=on>OK</span> | ';");
+  client.println("  if(wm2!==null){");
+  client.println("    s+='<b>Solar:</b> <span style=\"font-size:1.4em;font-weight:bold\">'+wm2.toFixed(1)+'</span> W/m&sup2;';");
+  client.println("    var pct=Math.min(100,wm2/10);");
+  client.println("    var col=wm2>600?'#ffa726':wm2>200?'#66bb6a':'#5e6ad2';");
+  client.println("    s+=' <div class=bar><div class=fill style=\"background:'+col+';width:'+pct+'%\"></div></div>';");
+  client.println("  } else s+='<span class=off>no reading</span>';");
+  client.println("} else s+='<b>ADS1110:</b> <span class=off>not detected</span> — connect M5Stack ADC Unit to Grove I2C';");
+  client.println("document.getElementById('solstat').innerHTML=s;");
+  // Irrigation runtime
+  client.println("var ir=d.irrigation||[];var h='<h3>Irrigation Status</h3>';");
+  client.println("var any=false;for(var i=0;i<ir.length;i++)if(ir[i].enabled)any=true;");
+  client.println("if(any){");
+  client.println("h+='<table><tr><th>Rule</th><th>Relay</th><th>Accumulated</th><th>Threshold</th><th>Progress</th><th>State</th><th>Today</th></tr>';");
+  client.println("for(var i=0;i<ir.length;i++){var r=ir[i];if(!r.enabled)continue;");
+  client.println("var pct=Math.min(100,(r.accum_mj/r.threshold_mj)*100);");
+  client.println("h+='<tr><td>'+(i+1)+'</td><td>CH'+(r.relay_ch+1)+'</td>';");
+  client.println("h+='<td>'+r.accum_mj.toFixed(3)+' MJ/m&sup2;</td>';");
+  client.println("h+='<td>'+r.threshold_mj+' MJ/m&sup2;</td>';");
+  client.println("h+='<td><div class=bar><div class=fill style=\"background:'+(r.irrigating?'#42a5f5':'#43a047')+';width:'+pct+'%\"></div></div> '+pct.toFixed(0)+'%</td>';");
+  client.println("h+='<td class='+(r.irrigating?'on':'off')+'><b>'+(r.irrigating?'WATERING'+(r.remaining_sec?' ('+r.remaining_sec+'s)':''):'Accumulating')+'</b></td>';");
+  client.println("h+='<td><b>'+r.today_count+'</b></td></tr>';}");
+  client.println("h+='</table>';}else{h+='<span class=off>No rules configured</span>';}");
+  client.println("document.getElementById('irrirun').innerHTML=h;");
+  client.println("});}");
+  client.println("irLoad();setInterval(irLoad,3000);");
+  client.println("</script>");
+  client.println("</body></html>");
+}
+
+// ============================================================
+// POST /api/irrigation
+// ============================================================
+void handleIrrigationPost(WiFiClient& client, const String& body) {
+  auto getField = [&](const String& key) -> String {
+    String search = key + "=";
+    int idx = body.indexOf(search);
+    if (idx < 0) return "";
+    idx += search.length();
+    int end = body.indexOf('&', idx);
+    if (end < 0) end = body.length();
+    return body.substring(idx, end);
+  };
+
+  for (int i = 0; i < IRRI_SLOTS; i++) {
+    String en = getField(String("en") + i);
+    irriCtrl[i].enabled = (en == "1");
+
+    String rc = getField(String("rc") + i);
+    if (rc.length() > 0) irriCtrl[i].relay_ch = rc.toInt();
+
+    String th = getField(String("th") + i);
+    if (th.length() > 0) irriCtrl[i].threshold_mj = th.toFloat();
+
+    String du = getField(String("du") + i);
+    if (du.length() > 0) irriCtrl[i].duration_sec = du.toInt();
+
+    String mw = getField(String("mw") + i);
+    if (mw.length() > 0) irriCtrl[i].min_wm2 = mw.toFloat();
+
+    // Reset runtime on config change
+    irriRun[i].accum_mj = 0.0;
+    irriRun[i].last_sample = 0;
+  }
+
+  saveIrrigationConfig();
+
+  client.println("HTTP/1.1 303 See Other");
+  client.println("Location: /irrigation");
+  client.println("Connection: close");
+  client.println();
+}
+
+// ============================================================
 // OTA Firmware Update Page (GET /ota)
 // ============================================================
 void sendOTAPage(WiFiClient& client) {
@@ -1872,6 +2226,10 @@ void handleWebClient() {
     sendGreenhousePage(client);
   } else if (method == "POST" && path == "/api/greenhouse") {
     handleGreenhousePost(client, body);
+  } else if (method == "GET" && path == "/irrigation") {
+    sendIrrigationPage(client);
+  } else if (method == "POST" && path == "/api/irrigation") {
+    handleIrrigationPost(client, body);
   } else if (method == "POST" && path == "/api/config") {
     handleConfigPost(client, body);
   } else if (method == "POST" && path == "/api/ccm") {
@@ -1924,6 +2282,7 @@ void setup() {
   loadConfig();
   loadCcmMapping();
   loadGreenhouseConfig();
+  loadIrrigationConfig();
 
   Serial.printf("Node=%s\n", nodeId.c_str());
   Serial.printf("[BOOT] hostname: %s.local\n", mdnsHostname.c_str());
@@ -2065,6 +2424,9 @@ void loop() {
 
   // Greenhouse local control (every loop for duty cycle switching)
   greenhouseControl(now);
+
+  // Solar irrigation control (accumulation + trigger)
+  irrigationControl(now);
 
   // NTP re-sync
   static unsigned long lastNtpSync = 0;

@@ -17,15 +17,17 @@ ArSproutのCCMネットワークに**設定不要で参加**。UECS-CCM (UDP mul
 | CCM送信 | リレー状態 + センサー値をCCM XMLでbroadcast (10秒間隔) |
 | CCM受信 | type+room+region+orderマッチでリレー制御 (priority考慮) |
 | I2Cセンサー | SHT40 自動検出 → InAirTemp/InAirHumid としてCCM送信 |
+| 日射センサー | PVSS-03 + M5Stack ADC Unit (ADS1110 I2C) → InRadiation としてCCM送信 |
+| 日射比例灌水 | 積算日射量(MJ/m²)閾値で灌水リレー自動ON/OFF (2ルール対応) |
 | 1-Wire温度 | DS18B20 (GPIO3) 自動検出 → InAirTemp region=12 としてCCM送信 |
 | RS485排水センサー | DFRobot SEN0575 → WRainfallAmt としてCCM送信 |
-| WebUI | ダッシュボード + CCMマッピング + ネットワーク設定 + OTA更新 |
+| WebUI | ダッシュボード + CCMマッピング + Greenhouse + Irrigation + OTA |
 | OTA更新 | WebUI `/ota` からブラウザ経由でFW書き込み（10台超の運用に対応） |
 | RGB LED | WS2812 (GPIO2) 状態表示: 緑=正常 / 黄=リレー稼働 / 赤=Ethernet断 |
 | USB-UARTデバッグ | `status` / `help` / `reboot` コマンド対応 |
 | mDNS | `{hostname}.local` |
 | Watchdog 3段 | HW WDT 8s / SW WDT / 定期リブート 10分 |
-| 設定永続化 | LittleFS /config.json + /ccm_map.json |
+| 設定永続化 | LittleFS /config.json + /ccm_map.json + /gh_ctrl.json + /irri_ctrl.json |
 
 ---
 
@@ -100,14 +102,18 @@ curl --data-binary @/tmp/ccm_ota/ccm_rp2350_relay.ino.bin \
 
 | パス | メソッド | 説明 |
 |------|---------|------|
-| `/` | GET | ダッシュボード (リレー+DI+センサー+CCMマッピング) |
+| `/` | GET | ダッシュボード (リレー+DI+センサー+Greenhouse+Irrigation) |
 | `/config` | GET | ネットワーク設定 (IP/mDNS) |
 | `/ccm` | GET | CCMマッピング設定 (Bulk Set / DI連動 / WDTタイマー) |
+| `/greenhouse` | GET | 温度比例制御設定 (4ルール) |
+| `/irrigation` | GET | 日射比例灌水設定 (2ルール) |
 | `/ota` | GET | FW更新ページ (ブラウザからbin選択→アップロード→自動リブート) |
-| `/api/state` | GET | 状態JSON (リレー/DI/センサー/CCMマッピング) |
+| `/api/state` | GET | 状態JSON (リレー/DI/センサー/CCM/Greenhouse/Irrigation) |
 | `/api/config` | GET | ネットワーク設定JSON |
 | `/api/config` | POST | ネットワーク設定保存 → リブート |
 | `/api/ccm` | POST | CCMマッピング保存 (リブート不要) |
+| `/api/greenhouse` | POST | Greenhouse制御設定保存 |
+| `/api/irrigation` | POST | Irrigation制御設定保存 |
 | `/api/relay/{ch}` | POST | リレー手動制御 |
 | `/api/ota` | POST | FWバイナリ受信 → フラッシュ → リブート |
 
@@ -118,10 +124,29 @@ curl --data-binary @/tmp/ccm_ota/ccm_rp2350_relay.ino.bin \
 | センサー | インターフェース | GPIO | CCM送信 | 備考 |
 |---------|----------------|------|---------|------|
 | SHT40 | I2C1 (Grove) | 6/7 | InAirTemp, InAirHumid | 自動検出 |
+| PVSS-03 + ADS1110 | I2C1 (Grove) | 6/7 | InRadiation | M5Stack ADC Unit V1.1経由。0-1V=0-1000W/m² |
 | DS18B20 | 1-Wire | 3 | InAirTemp (region=12) | Grove基板から引出し |
 | SEN0575 | RS485 (Modbus RTU) | 4/5 | WRainfallAmt | 排水センサー |
 
 センサーは全て **自動検出**。未接続でも正常動作する。
+
+---
+
+## 日射比例灌水
+
+WebUI `/irrigation` ページで設定。M5Stack ADC Unit V1.1 (ADS1110) + PVSS-03日射センサーをGrove I2Cに接続。
+
+**動作**: 日射量を積算 → 閾値(MJ/m²)到達 → 灌水リレーON → 設定秒数後OFF → カウンタリセット → 再積算
+
+| 設定項目 | デフォルト | 説明 |
+|---------|-----------|------|
+| Threshold | 0.5 MJ/m² | 灌水トリガーの積算日射量 (成長段階で調整) |
+| Duration | 120秒 | 1回の灌水時間 |
+| Min W/m² | 50 | この値未満は積算しない (夜間ノイズ除外) |
+
+- 2ルール対応 (e.g. 点滴灌水 + ミスト)
+- CCM `InRadiation` としてArSproutにも日射値をbroadcast
+- ADS1110未接続でも他機能は正常動作
 
 ---
 
