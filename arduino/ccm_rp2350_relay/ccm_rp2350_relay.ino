@@ -81,6 +81,7 @@ struct CcmMapping {
   int      order;
   int      priority;
   char     suffix[8];     // ".cMC", ".mC", ".MC" — default ".cMC"
+  int      watchdog_sec;  // 無通信タイマー秒 (0=無効, >0: 最終CCM受信からN秒でOFF)
 };
 
 // ArSprout標準のアクチュエータタイプ
@@ -105,6 +106,7 @@ const int HW_WDT_TIMEOUT_MS = 8000;
 // ========== Global State ==========
 uint8_t      relayState          = 0x00;
 unsigned long relayDurationEnd[8] = {0};
+unsigned long lastCcmRx[8]       = {0};  // 最終CCM受信時刻 (millis)
 
 bool diState[8]     = {false};
 bool diPrevState[8] = {false};
@@ -629,6 +631,7 @@ void ccmReceive() {
       float fval = atof(valBuf);
       int ival = (int)(fval + 0.5);
 
+      lastCcmRx[ch] = millis();
       if (ival > 0) {
         setRelay(ch + 1, true);
       } else {
@@ -653,6 +656,7 @@ void loadCcmMapping() {
     ccmMap[i].region   = 61;
     ccmMap[i].order    = 1;
     ccmMap[i].priority = 1;
+    ccmMap[i].watchdog_sec = 60;
     strncpy(ccmMap[i].suffix, ".cMC", sizeof(ccmMap[i].suffix));
   }
 
@@ -682,7 +686,8 @@ void loadCcmMapping() {
     ccmMap[idx].room     = ch["room"]     | 1;
     ccmMap[idx].region   = ch["region"]   | 61;
     ccmMap[idx].order    = ch["order"]    | 1;
-    ccmMap[idx].priority = ch["priority"] | 1;
+    ccmMap[idx].priority     = ch["priority"]     | 1;
+    ccmMap[idx].watchdog_sec = ch["watchdog_sec"] | 60;
     const char* sfx = ch["suffix"] | ".cMC";
     strncpy(ccmMap[idx].suffix, sfx, sizeof(ccmMap[idx].suffix) - 1);
     ccmMap[idx].suffix[sizeof(ccmMap[idx].suffix) - 1] = '\0';
@@ -709,8 +714,9 @@ void saveCcmMapping() {
     ch["room"]     = ccmMap[i].room;
     ch["region"]   = ccmMap[i].region;
     ch["order"]    = ccmMap[i].order;
-    ch["priority"] = ccmMap[i].priority;
-    ch["suffix"]   = ccmMap[i].suffix;
+    ch["priority"]     = ccmMap[i].priority;
+    ch["watchdog_sec"] = ccmMap[i].watchdog_sec;
+    ch["suffix"]       = ccmMap[i].suffix;
   }
 
   File f = LittleFS.open("/ccm_map.json", "w");
@@ -950,7 +956,9 @@ void sendAPIState(WiFiClient& client) {
     m["room"]     = ccmMap[i].room;
     m["region"]   = ccmMap[i].region;
     m["order"]    = ccmMap[i].order;
-    m["priority"] = ccmMap[i].priority;
+    m["priority"]     = ccmMap[i].priority;
+    m["watchdog_sec"] = ccmMap[i].watchdog_sec;
+    m["last_rx_ago"]  = lastCcmRx[i] > 0 ? (int)((millis() - lastCcmRx[i]) / 1000) : -1;
   }
 
   // Sensor
@@ -1144,7 +1152,7 @@ void sendCcmConfigPage(WiFiClient& client) {
   client.println(" <button type=button onclick=\"var v=document.getElementById('bulkRegion').value;if(v)for(var i=0;i<8;i++)document.getElementsByName('region'+i)[0].value=v;\">Apply to All</button>");
   client.println("</div>");
   client.println("<form method=POST action=/api/ccm>");
-  client.println("<table><tr><th>CH</th><th>CCM Type</th><th>Room</th><th>Region</th><th>Order</th><th>Priority</th></tr>");
+  client.println("<table><tr><th>CH</th><th>CCM Type</th><th>Room</th><th>Region</th><th>Order</th><th>Priority</th><th>WDT(s)</th></tr>");
 
   for (int i = 0; i < 8; i++) {
     client.printf("<tr><td>%d</td><td><select name=type%d>", i + 1, i);
@@ -1159,7 +1167,8 @@ void sendCcmConfigPage(WiFiClient& client) {
     client.printf("<td><input type=number name=room%d value=%d min=1 max=999></td>", i, ccmMap[i].room);
     client.printf("<td><input type=number name=region%d value=%d min=1 max=999></td>", i, ccmMap[i].region);
     client.printf("<td><input type=number name=order%d value=%d min=1 max=99></td>", i, ccmMap[i].order);
-    client.printf("<td><input type=number name=pri%d value=%d min=1 max=99></td></tr>", i, ccmMap[i].priority);
+    client.printf("<td><input type=number name=pri%d value=%d min=1 max=99></td>", i, ccmMap[i].priority);
+    client.printf("<td><input type=number name=wdt%d value=%d min=0 max=3600></td></tr>", i, ccmMap[i].watchdog_sec);
   }
 
   client.println("</table>");
@@ -1296,6 +1305,9 @@ void handleCcmConfigPost(WiFiClient& client, const String& body) {
 
     String p = getField(String("pri") + i);
     if (p.length() > 0) ccmMap[i].priority = p.toInt();
+
+    String w = getField(String("wdt") + i);
+    if (w.length() > 0) ccmMap[i].watchdog_sec = w.toInt();
   }
 
   saveCcmMapping();
@@ -1612,6 +1624,17 @@ void loop() {
       setRelay(i + 1, false);
       relayDurationEnd[i] = 0;
       Serial.printf("CH%d auto-OFF\n", i + 1);
+    }
+  }
+
+  // CCM watchdog: 無通信タイマーでリレー強制OFF
+  for (int i = 0; i < 8; i++) {
+    if (ccmMap[i].watchdog_sec > 0 && lastCcmRx[i] > 0 &&
+        (relayState & (1 << i)) &&
+        (now - lastCcmRx[i]) >= (unsigned long)ccmMap[i].watchdog_sec * 1000UL) {
+      setRelay(i + 1, false);
+      lastCcmRx[i] = 0;
+      Serial.printf("[WATCHDOG] CH%d OFF — no CCM for %ds\n", i + 1, ccmMap[i].watchdog_sec);
     }
   }
 
